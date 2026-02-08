@@ -152,6 +152,23 @@ def finalize_policy(
         "policy": selected,
     }
 
+    # Optional: annotate finalized policy notes with IPS meta (e.g., scout mode)
+    mode = str(inputs_snapshot.get("mode", "")).strip().lower()
+    review_months = inputs_snapshot.get("review_after_months")
+
+    if mode == "scout":
+        try:
+            m = int(review_months) if review_months is not None else 6
+        except (TypeError, ValueError):
+            m = 6
+
+        notes = policy_doc["policy"].setdefault("notes", {})
+        if not isinstance(notes, dict):
+            policy_doc["policy"]["notes"] = {"rationale": str(notes)}
+            notes = policy_doc["policy"]["notes"]
+
+        notes["scout_mode"] = f"Scout allocation: initial budget; review after {m} months."
+
     out_policy = write_yaml(policy_path, policy_doc)
     append_policy_history(
         history_path,
@@ -177,6 +194,9 @@ def _default_inputs() -> dict[str, Any]:
         "contribution_plan": {
             "type": "lump_sum_split",
             "months": 12,
+        "mode": "standard",
+        "review_after_months": None,
+
         },
         "allowed_assets": {
             "equities": True,
