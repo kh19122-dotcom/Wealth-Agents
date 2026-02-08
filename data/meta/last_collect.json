@@ -1,0 +1,161 @@
+{
+  "status": "partial",
+  "timestamp": "2026-02-07T21:16:53Z",
+  "feeds_total": 20,
+  "feeds_success": 11,
+  "feeds_ok": 11,
+  "feeds_failed": 9,
+  "feeds_skipped": 9,
+  "fetched": 324,
+  "error_type": "http_error",
+  "error_samples": [
+    "https://www.ecb.europa.eu/press/rss/press.xml: skipped (quarantined until 2026-02-14T20:15:16Z)",
+    "https://www.imf.org/en/News/RSS: skipped (quarantined until 2026-02-14T20:15:16Z)",
+    "https://www.worldbank.org/en/news/all?format=rss: skipped (quarantined until 2026-02-14T20:15:17Z)",
+    "https://rss.dw.com/rdf/rss-de-wirtschaft: skipped (quarantined until 2026-02-14T20:15:18Z)",
+    "https://en.yna.co.kr/RSS/economy.xml: skipped (quarantined until 2026-02-14T20:15:20Z)"
+  ],
+  "feed_statuses": [
+    {
+      "source": "wall_street_journal_markets",
+      "feed_url": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+      "status": "ok",
+      "skipped": false,
+      "fetched": 20
+    },
+    {
+      "source": "marketwatch_top_stories",
+      "feed_url": "https://www.marketwatch.com/rss/topstories",
+      "status": "ok",
+      "skipped": false,
+      "fetched": 10
+    },
+    {
+      "source": "cnbc_markets",
+      "feed_url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+      "status": "ok",
+      "skipped": false,
+      "fetched": 30
+    },
+    {
+      "source": "financial_times_home",
+      "feed_url": "https://www.ft.com/rss/home",
+      "status": "ok",
+      "skipped": false,
+      "fetched": 8
+    },
+    {
+      "source": "federal_reserve_press",
+      "feed_url": "https://www.federalreserve.gov/feeds/press_all.xml",
+      "status": "ok",
+      "skipped": false,
+      "fetched": 20
+    },
+    {
+      "source": "ecb_press",
+      "feed_url": "https://www.ecb.europa.eu/press/rss/press.xml",
+      "status": "http_error",
+      "skipped": true,
+      "fetched": 0
+    },
+    {
+      "source": "imf_news",
+      "feed_url": "https://www.imf.org/en/News/RSS",
+      "status": "http_error",
+      "skipped": true,
+      "fetched": 0
+    },
+    {
+      "source": "world_bank_news",
+      "feed_url": "https://www.worldbank.org/en/news/all?format=rss",
+      "status": "parse_error",
+      "skipped": true,
+      "fetched": 0
+    },
+    {
+      "source": "handelsblatt_headlines",
+      "feed_url": "https://www.handelsblatt.com/contentexport/feed/schlagzeilen",
+      "status": "ok",
+      "skipped": false,
+      "fetched": 50
+    },
+    {
+      "source": "faz_wirtschaft",
+      "feed_url": "https://www.faz.net/rss/aktuell/wirtschaft/",
+      "status": "ok",
+      "skipped": false,
+      "fetched": 23
+    },
+    {
+      "source": "spiegel_wirtschaft",
+      "feed_url": "https://www.spiegel.de/wirtschaft/index.rss",
+      "status": "ok",
+      "skipped": false,
+      "fetched": 20
+    },
+    {
+      "source": "tagesschau_wirtschaft",
+      "feed_url": "https://www.tagesschau.de/wirtschaft/index~rss2.xml",
+      "status": "ok",
+      "skipped": false,
+      "fetched": 78
+    },
+    {
+      "source": "sueddeutsche_wirtschaft",
+      "feed_url": "https://rss.sueddeutsche.de/rss/Wirtschaft",
+      "status": "ok",
+      "skipped": false,
+      "fetched": 15
+    },
+    {
+      "source": "dw_wirtschaft_de",
+      "feed_url": "https://rss.dw.com/rdf/rss-de-wirtschaft",
+      "status": "parse_error",
+      "skipped": true,
+      "fetched": 0
+    },
+    {
+      "source": "yonhap_economy",
+      "feed_url": "https://en.yna.co.kr/RSS/economy.xml",
+      "status": "http_error",
+      "skipped": true,
+      "fetched": 0
+    },
+    {
+      "source": "korea_herald_business",
+      "feed_url": "https://www.koreaherald.com/common_prog/rssdisp.php?ct=020000000000.xml",
+      "status": "parse_error",
+      "skipped": true,
+      "fetched": 0
+    },
+    {
+      "source": "joongang_economy",
+      "feed_url": "https://koreajoongangdaily.joins.com/feeds/rss/economy.xml",
+      "status": "http_error",
+      "skipped": true,
+      "fetched": 0
+    },
+    {
+      "source": "korea_times_business",
+      "feed_url": "https://www.koreatimes.co.kr/www/rss/rss_2.xml",
+      "status": "http_error",
+      "skipped": true,
+      "fetched": 0
+    },
+    {
+      "source": "maeil_business_news",
+      "feed_url": "https://www.mk.co.kr/rss/30100041/",
+      "status": "ok",
+      "skipped": false,
+      "fetched": 50
+    },
+    {
+      "source": "bank_of_korea_news",
+      "feed_url": "https://www.bok.or.kr/eng/bbs/E0000634/rss.do",
+      "status": "http_error",
+      "skipped": true,
+      "fetched": 0
+    }
+  ],
+  "appended": 0
+}

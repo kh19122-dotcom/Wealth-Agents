@@ -1,0 +1,66 @@
+feeds:
+  global:
+    - name: wall_street_journal_markets
+      url: https://feeds.a.dj.com/rss/RSSMarketsMain.xml
+      tags: [equities, markets]
+    - name: marketwatch_top_stories
+      url: https://www.marketwatch.com/rss/topstories
+      tags: [markets, macroeconomics]
+    - name: cnbc_markets
+      url: https://www.cnbc.com/id/100003114/device/rss/rss.html
+      tags: [equities, rates]
+    - name: financial_times_home
+      url: https://www.ft.com/rss/home
+      tags: [macroeconomics, global]
+    - name: federal_reserve_press
+      url: https://www.federalreserve.gov/feeds/press_all.xml
+      tags: [rates, macroeconomics]
+    - name: ecb_press
+      url: https://www.ecb.europa.eu/press/rss/press.xml
+      tags: [rates, europe]
+    - name: imf_news
+      url: https://www.imf.org/en/News/RSS
+      tags: [macroeconomics, global]
+    - name: world_bank_news
+      url: https://www.worldbank.org/en/news/all?format=rss
+      tags: [macroeconomics, development]
+
+  germany_de:
+    - name: handelsblatt_headlines
+      url: https://www.handelsblatt.com/contentexport/feed/schlagzeilen
+      tags: [macroeconomics, germany]
+    - name: faz_wirtschaft
+      url: https://www.faz.net/rss/aktuell/wirtschaft/
+      tags: [equities, germany]
+    - name: spiegel_wirtschaft
+      url: https://www.spiegel.de/wirtschaft/index.rss
+      tags: [macroeconomics, germany]
+    - name: tagesschau_wirtschaft
+      url: https://www.tagesschau.de/wirtschaft/index~rss2.xml
+      tags: [macroeconomics, germany]
+    - name: sueddeutsche_wirtschaft
+      url: https://rss.sueddeutsche.de/rss/Wirtschaft
+      tags: [macroeconomics, germany]
+    - name: dw_wirtschaft_de
+      url: https://rss.dw.com/rdf/rss-de-wirtschaft
+      tags: [macroeconomics, germany]
+
+  korea_ko:
+    - name: yonhap_economy
+      url: https://en.yna.co.kr/RSS/economy.xml
+      tags: [macroeconomics, korea]
+    - name: korea_herald_business
+      url: https://www.koreaherald.com/common_prog/rssdisp.php?ct=020000000000.xml
+      tags: [equities, korea]
+    - name: joongang_economy
+      url: https://koreajoongangdaily.joins.com/feeds/rss/economy.xml
+      tags: [macroeconomics, korea]
+    - name: korea_times_business
+      url: https://www.koreatimes.co.kr/www/rss/rss_2.xml
+      tags: [equities, korea]
+    - name: maeil_business_news
+      url: https://www.mk.co.kr/rss/30100041/
+      tags: [equities, korea]
+    - name: bank_of_korea_news
+      url: https://www.bok.or.kr/eng/bbs/E0000634/rss.do
+      tags: [rates, korea]

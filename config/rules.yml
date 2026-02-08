@@ -1,0 +1,31 @@
+{
+  "top_terms": [
+    "inflation",
+    "recession",
+    "rate hike",
+    "rate cut",
+    "central bank",
+    "gdp",
+    "earnings",
+    "housing",
+    "real estate",
+    "bond yield",
+    "unemployment"
+  ],
+  "categories": {
+    "macroeconomics": ["inflation", "cpi", "pce", "gdp", "recession", "unemployment", "central bank", "fiscal", "imf", "world bank"],
+    "equities": ["stock", "equity", "earnings", "guidance", "valuation", "buyback", "index", "s&p", "nasdaq"],
+    "rates": ["interest rate", "rate hike", "rate cut", "fed", "ecb", "boj", "treasury yield", "bond yield", "monetary policy"],
+    "real_estate": ["immobilien", "miete", "rent", "mortgage", "housing", "house prices", "reit", "property", "wohnung", "bauzinsen"],
+    "germany": ["germany", "german", "bundesbank", "dax", "berlin", "frankfurt"],
+    "korea": ["korea", "korean", "boks", "bank of korea", "kospi", "seoul"],
+    "personal_finance": ["savings", "retirement", "401k", "credit card", "debt", "budgeting", "household finance", "doordash", "ubereats", "subscription", "financial health", "spending"]
+  },
+  "signals": {
+    "rate_pressure": ["rate hike", "higher for longer", "hawkish", "tightening"],
+    "inflation_spike": ["inflation spike", "sticky inflation", "cpi surprise", "price pressure"],
+    "property_stress": ["housing slump", "property downturn", "mortgage stress", "delinquency"],
+    "labor_softness": ["layoffs", "jobless claims", "unemployment rise"],
+    "growth_slowdown": ["slowdown", "contraction", "recession risk"]
+  }
+}

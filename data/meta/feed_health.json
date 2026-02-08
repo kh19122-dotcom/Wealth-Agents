@@ -1,0 +1,222 @@
+{
+  "local_feed": {
+    "source": "local_feed",
+    "url": "file:///private/var/folders/j_/ywr56b853n7fzlv6vmxp75hr0000gp/T/pytest-of-hwiwookim/pytest-17/test_collect_writes_last_colle0/sample_feed.xml",
+    "status": "ok",
+    "last_ok_at": "2026-02-07T19:28:20Z",
+    "last_error_at": null,
+    "consecutive_failures": 0,
+    "last_error_type": null,
+    "quarantined_until": null
+  },
+  "broken_feed": {
+    "source": "broken_feed",
+    "url": "https://nonexistent.invalid/rss.xml",
+    "status": "failing",
+    "last_ok_at": null,
+    "last_error_at": "2026-02-07T19:28:20Z",
+    "consecutive_failures": 1,
+    "last_error_type": "dns",
+    "quarantined_until": null
+  },
+  "wall_street_journal_markets": {
+    "source": "wall_street_journal_markets",
+    "url": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+    "status": "ok",
+    "last_ok_at": "2026-02-07T21:16:53Z",
+    "last_error_at": null,
+    "consecutive_failures": 0,
+    "last_error_type": null,
+    "quarantined_until": null
+  },
+  "marketwatch_top_stories": {
+    "source": "marketwatch_top_stories",
+    "url": "https://www.marketwatch.com/rss/topstories",
+    "status": "ok",
+    "last_ok_at": "2026-02-07T21:16:54Z",
+    "last_error_at": null,
+    "consecutive_failures": 0,
+    "last_error_type": null,
+    "quarantined_until": null
+  },
+  "cnbc_markets": {
+    "source": "cnbc_markets",
+    "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    "status": "ok",
+    "last_ok_at": "2026-02-07T21:16:54Z",
+    "last_error_at": null,
+    "consecutive_failures": 0,
+    "last_error_type": null,
+    "quarantined_until": null
+  },
+  "financial_times_home": {
+    "source": "financial_times_home",
+    "url": "https://www.ft.com/rss/home",
+    "status": "ok",
+    "last_ok_at": "2026-02-07T21:16:55Z",
+    "last_error_at": null,
+    "consecutive_failures": 0,
+    "last_error_type": null,
+    "quarantined_until": null
+  },
+  "federal_reserve_press": {
+    "source": "federal_reserve_press",
+    "url": "https://www.federalreserve.gov/feeds/press_all.xml",
+    "status": "ok",
+    "last_ok_at": "2026-02-07T21:16:56Z",
+    "last_error_at": null,
+    "consecutive_failures": 0,
+    "last_error_type": null,
+    "quarantined_until": null
+  },
+  "ecb_press": {
+    "source": "ecb_press",
+    "url": "https://www.ecb.europa.eu/press/rss/press.xml",
+    "status": "quarantined",
+    "last_ok_at": null,
+    "last_error_at": "2026-02-07T20:15:16Z",
+    "consecutive_failures": 3,
+    "last_error_type": "http_error",
+    "quarantined_until": "2026-02-14T20:15:16Z"
+  },
+  "imf_news": {
+    "source": "imf_news",
+    "url": "https://www.imf.org/en/News/RSS",
+    "status": "quarantined",
+    "last_ok_at": null,
+    "last_error_at": "2026-02-07T20:15:16Z",
+    "consecutive_failures": 3,
+    "last_error_type": "http_error",
+    "quarantined_until": "2026-02-14T20:15:16Z"
+  },
+  "world_bank_news": {
+    "source": "world_bank_news",
+    "url": "https://www.worldbank.org/en/news/all?format=rss",
+    "status": "quarantined",
+    "last_ok_at": null,
+    "last_error_at": "2026-02-07T20:15:17Z",
+    "consecutive_failures": 3,
+    "last_error_type": "parse_error",
+    "quarantined_until": "2026-02-14T20:15:17Z"
+  },
+  "handelsblatt_headlines": {
+    "source": "handelsblatt_headlines",
+    "url": "https://www.handelsblatt.com/contentexport/feed/schlagzeilen",
+    "status": "ok",
+    "last_ok_at": "2026-02-07T21:16:56Z",
+    "last_error_at": null,
+    "consecutive_failures": 0,
+    "last_error_type": null,
+    "quarantined_until": null
+  },
+  "faz_wirtschaft": {
+    "source": "faz_wirtschaft",
+    "url": "https://www.faz.net/rss/aktuell/wirtschaft/",
+    "status": "ok",
+    "last_ok_at": "2026-02-07T21:16:57Z",
+    "last_error_at": null,
+    "consecutive_failures": 0,
+    "last_error_type": null,
+    "quarantined_until": null
+  },
+  "spiegel_wirtschaft": {
+    "source": "spiegel_wirtschaft",
+    "url": "https://www.spiegel.de/wirtschaft/index.rss",
+    "status": "ok",
+    "last_ok_at": "2026-02-07T21:16:57Z",
+    "last_error_at": null,
+    "consecutive_failures": 0,
+    "last_error_type": null,
+    "quarantined_until": null
+  },
+  "tagesschau_wirtschaft": {
+    "source": "tagesschau_wirtschaft",
+    "url": "https://www.tagesschau.de/wirtschaft/index~rss2.xml",
+    "status": "ok",
+    "last_ok_at": "2026-02-07T21:16:57Z",
+    "last_error_at": null,
+    "consecutive_failures": 0,
+    "last_error_type": null,
+    "quarantined_until": null
+  },
+  "sueddeutsche_wirtschaft": {
+    "source": "sueddeutsche_wirtschaft",
+    "url": "https://rss.sueddeutsche.de/rss/Wirtschaft",
+    "status": "ok",
+    "last_ok_at": "2026-02-07T21:16:57Z",
+    "last_error_at": null,
+    "consecutive_failures": 0,
+    "last_error_type": null,
+    "quarantined_until": null
+  },
+  "dw_wirtschaft_de": {
+    "source": "dw_wirtschaft_de",
+    "url": "https://rss.dw.com/rdf/rss-de-wirtschaft",
+    "status": "quarantined",
+    "last_ok_at": null,
+    "last_error_at": "2026-02-07T20:15:18Z",
+    "consecutive_failures": 3,
+    "last_error_type": "parse_error",
+    "quarantined_until": "2026-02-14T20:15:18Z"
+  },
+  "yonhap_economy": {
+    "source": "yonhap_economy",
+    "url": "https://en.yna.co.kr/RSS/economy.xml",
+    "status": "quarantined",
+    "last_ok_at": null,
+    "last_error_at": "2026-02-07T20:15:20Z",
+    "consecutive_failures": 3,
+    "last_error_type": "http_error",
+    "quarantined_until": "2026-02-14T20:15:20Z"
+  },
+  "korea_herald_business": {
+    "source": "korea_herald_business",
+    "url": "https://www.koreaherald.com/common_prog/rssdisp.php?ct=020000000000.xml",
+    "status": "quarantined",
+    "last_ok_at": null,
+    "last_error_at": "2026-02-07T20:15:23Z",
+    "consecutive_failures": 3,
+    "last_error_type": "parse_error",
+    "quarantined_until": "2026-02-14T20:15:23Z"
+  },
+  "joongang_economy": {
+    "source": "joongang_economy",
+    "url": "https://koreajoongangdaily.joins.com/feeds/rss/economy.xml",
+    "status": "quarantined",
+    "last_ok_at": null,
+    "last_error_at": "2026-02-07T20:15:24Z",
+    "consecutive_failures": 3,
+    "last_error_type": "http_error",
+    "quarantined_until": "2026-02-14T20:15:24Z"
+  },
+  "korea_times_business": {
+    "source": "korea_times_business",
+    "url": "https://www.koreatimes.co.kr/www/rss/rss_2.xml",
+    "status": "quarantined",
+    "last_ok_at": null,
+    "last_error_at": "2026-02-07T20:15:25Z",
+    "consecutive_failures": 3,
+    "last_error_type": "http_error",
+    "quarantined_until": "2026-02-14T20:15:25Z"
+  },
+  "maeil_business_news": {
+    "source": "maeil_business_news",
+    "url": "https://www.mk.co.kr/rss/30100041/",
+    "status": "ok",
+    "last_ok_at": "2026-02-07T21:16:59Z",
+    "last_error_at": null,
+    "consecutive_failures": 0,
+    "last_error_type": null,
+    "quarantined_until": null
+  },
+  "bank_of_korea_news": {
+    "source": "bank_of_korea_news",
+    "url": "https://www.bok.or.kr/eng/bbs/E0000634/rss.do",
+    "status": "quarantined",
+    "last_ok_at": null,
+    "last_error_at": "2026-02-07T20:15:28Z",
+    "consecutive_failures": 3,
+    "last_error_type": "http_error",
+    "quarantined_until": "2026-02-14T20:15:28Z"
+  }
+}
