@@ -137,6 +137,28 @@ def finalize_policy(
     selected = to_jsonable_copy(candidates[choice])
     inputs_snapshot = to_jsonable_copy(draft_doc.get("inputs_snapshot") or {})
 
+    # Thesis satellite sleeve (default: disabled)
+    mode = str(inputs_snapshot.get("mode", "")).strip().lower()
+    review_m = inputs_snapshot.get("review_after_months")
+    try:
+        review_m = int(review_m) if review_m is not None else 6
+    except (TypeError, ValueError):
+        review_m = 6
+
+    thesis = {
+        "enabled": False,
+        "target_pct": 0,
+        "max_pct": 10,
+        "review_after_months": review_m,
+        "allowed_types": ["thematic_equity", "industrial_manufacturing", "infrastructure"],
+        # Rule: when enabled, reduce global_equity first to keep total at 100%
+        "funding_rule": {"source_bucket": "global_equity"},
+        "notes": "Satellite (thesis) sleeve reserved for later activation; default OFF in scout.",
+    }
+    # Attach into the finalized policy document
+    selected.setdefault("thesis_sleeve", thesis)
+
+
     hash_basis = {
         "selected_candidate": choice,
         "inputs_snapshot": inputs_snapshot,
@@ -582,6 +604,12 @@ def _render_ips_report_md(policy_doc: dict[str, Any], draft_doc: dict[str, Any] 
     lines.append(f"- Risk tolerance: **{risk}**")
     lines.append(f"- Rebalance: **{reb.get('frequency','')}**, band **{reb.get('band_pct','')}%**")
     lines.append(f"- Constraints: no_leverage={constraints.get('no_leverage')}, no_short={constraints.get('no_short')}, no_crypto={constraints.get('no_crypto')}, sell_allowed={constraints.get('sell_allowed')}")
+    thesis = (pol.get("thesis_sleeve") or {}) if isinstance(pol, dict) else {}
+    if thesis:
+        lines.append(
+            f"- Thesis sleeve: enabled={thesis.get('enabled')}, target_pct={thesis.get('target_pct')}%, "
+            f"max_pct={thesis.get('max_pct')}%, review_after_months={thesis.get('review_after_months')}"
+        )
     lines.append("")
     lines.append("## Target Allocation")
     lines.append(f"- Global equity: **{_fmt_pct(eq)}**")
