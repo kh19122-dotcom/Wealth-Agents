@@ -170,6 +170,16 @@ def finalize_policy(
         notes["scout_mode"] = f"Scout allocation: initial budget; review after {m} months."
 
     out_policy = write_yaml(policy_path, policy_doc)
+    # Also write a human-readable IPS report for quick review
+    try:
+        report_md = _render_ips_report_md(policy_doc, draft_doc=draft_doc)
+        report_path = Path("reports") / "ips_report.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report_md, encoding="utf-8")
+    except Exception:
+        # Report is a convenience output; do not block policy finalization
+        pass
+
     append_policy_history(
         history_path,
         {
@@ -493,3 +503,113 @@ def _render_ips_report(inputs: dict[str, Any], candidates: dict[str, dict[str, A
 
 def _now_iso8601() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def _fmt_pct(x: Any) -> str:
+    try:
+        return f"{float(x):.0f}%"
+    except Exception:
+        return str(x)
+
+def _get_bucket_pct(target_allocation: Any, bucket: str) -> Any:
+    if not isinstance(target_allocation, list):
+        return None
+    for row in target_allocation:
+        if isinstance(row, dict) and row.get("bucket") == bucket:
+            return row.get("pct")
+    return None
+
+def _render_ips_report_md(policy_doc: dict[str, Any], draft_doc: dict[str, Any] | None = None) -> str:
+    """
+    Deterministic human-readable IPS summary for review/archiving.
+    """
+    inputs = policy_doc.get("inputs_snapshot") or {}
+    pol = policy_doc.get("policy") or {}
+    selected_name = policy_doc.get("selected_candidate", "unknown")
+    notes = (pol.get("notes") or {}) if isinstance(pol.get("notes"), dict) else {}
+
+    investable = inputs.get("investable_amount_eur")
+    cash_buf = inputs.get("cash_buffer_eur")
+    horizon = inputs.get("horizon_years")
+    risk = inputs.get("risk_tolerance")
+    reb = inputs.get("rebalance") or {}
+    constraints = inputs.get("constraints") or {}
+
+    ta = pol.get("target_allocation") or []
+    eq = _get_bucket_pct(ta, "global_equity")
+    bd = _get_bucket_pct(ta, "bonds_cashlike")
+    au = _get_bucket_pct(ta, "optional_gold")
+
+    # Candidate comparison table (if draft present)
+    candidates = (draft_doc or {}).get("candidates") or {}
+    rows = []
+    if isinstance(candidates, dict) and candidates:
+        for name, c in candidates.items():
+            alloc = (c or {}).get("target_allocation") or []
+            r_eq = _get_bucket_pct(alloc, "global_equity")
+            r_bd = _get_bucket_pct(alloc, "bonds_cashlike")
+            r_au = _get_bucket_pct(alloc, "optional_gold")
+            g = (c or {}).get("guardrails") or {}
+            max_single = g.get("max_single_asset_pct")
+            rows.append((name, r_eq, r_bd, r_au, max_single))
+
+    # Confirmation questions (deterministic)
+    q = []
+    # Scout mode question
+    mode = str(inputs.get("mode", "")).strip().lower()
+    if mode == "scout":
+        m = inputs.get("review_after_months") or 6
+        q.append(f"Scout mode: review after {m} months (performance/volatility). Proceed?")
+    # Sell allowed question
+    if constraints.get("sell_allowed") is True:
+        q.append("Sell allowed: rebalancing may include sells. OK with taxes/fees impact?")
+    else:
+        q.append("Buy-only: rebalancing uses buys only. Keep this constraint?")
+    # Gold optional
+    if _get_bucket_pct(ta, "optional_gold") not in (None, 0, 0.0):
+        q.append("Gold allocation: keep optional gold weight as-is? (Yes/No)")
+
+    # Build markdown
+    lines: list[str] = []
+    lines.append(f"# IPS Report  {policy_doc.get('policy_version','')}")
+    lines.append("")
+    lines.append("## Policy Snapshot")
+    lines.append(f"- Selected candidate: **{selected_name}**")
+    lines.append(f"- Policy hash: `{policy_doc.get('policy_hash','')}`")
+    lines.append(f"- Base currency: **{inputs.get('base_currency','')}**")
+    lines.append(f"- Investable amount: **{investable}**")
+    lines.append(f"- Cash buffer: **{cash_buf}**")
+    lines.append(f"- Horizon: **{horizon} years**")
+    lines.append(f"- Risk tolerance: **{risk}**")
+    lines.append(f"- Rebalance: **{reb.get('frequency','')}**, band **{reb.get('band_pct','')}%**")
+    lines.append(f"- Constraints: no_leverage={constraints.get('no_leverage')}, no_short={constraints.get('no_short')}, no_crypto={constraints.get('no_crypto')}, sell_allowed={constraints.get('sell_allowed')}")
+    lines.append("")
+    lines.append("## Target Allocation")
+    lines.append(f"- Global equity: **{_fmt_pct(eq)}**")
+    lines.append(f"- Bonds/Cash-like: **{_fmt_pct(bd)}**")
+    lines.append(f"- Optional gold: **{_fmt_pct(au)}**")
+    lines.append("")
+    lines.append("## Rebalance & Contributions")
+    rr = pol.get("rebalance_rules") or {}
+    cs = pol.get("contribution_schedule") or {}
+    lines.append(f"- Rebalance rule: frequency={rr.get('frequency')}, band_pct={rr.get('band_pct')}, buy_only={rr.get('buy_only')}")
+    lines.append(f"- Contribution plan: type={cs.get('type')}, months={cs.get('months')}, planned_installment_eur={cs.get('planned_installment_eur')}")
+    lines.append("")
+    lines.append("## Rationale & Risks")
+    if isinstance(notes, dict):
+        for k in ("rationale", "pros", "cons", "risks", "scout_mode"):
+            if k in notes and notes.get(k):
+                lines.append(f"- **{k}**: {notes.get(k)}")
+    lines.append("")
+    if rows:
+        lines.append("## Candidate Comparison")
+        lines.append("| candidate | equity | bonds/cashlike | gold | max_single_asset_pct |")
+        lines.append("|---|---:|---:|---:|---:|")
+        for name, r_eq, r_bd, r_au, max_single in rows:
+            lines.append(f"| {name} | {_fmt_pct(r_eq)} | {_fmt_pct(r_bd)} | {_fmt_pct(r_au)} | {max_single} |")
+        lines.append("")
+    lines.append("## Confirmation Questions")
+    for i, item in enumerate(q, 1):
+        lines.append(f"{i}. {item}")
+    lines.append("")
+    return "\n".join(lines)
+
