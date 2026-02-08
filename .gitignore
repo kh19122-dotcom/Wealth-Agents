@@ -13,3 +13,12 @@ reports/*.md
 !data/raw/.gitkeep
 !data/policy/.gitkeep
 !reports/.gitkeep
+
+# runtime/meta artifacts
+data/meta/*.json
+data/meta/*.jsonl
+
+# raw backups/corrupt artifacts
+data/raw/*.bak*
+data/raw/*.corrupt
+data/raw/*.tmp
