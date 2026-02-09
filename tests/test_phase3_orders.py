@@ -94,9 +94,16 @@ def test_propose_monthly_orders_smoke_deterministic_allocation(tmp_path: Path):
 
     assert sum(order["amount_eur"] for order in persisted["orders"]) == 2500
     assert all(order["side"] == "BUY" for order in persisted["orders"])
+    assert all("instrument_id" in order for order in persisted["orders"])
 
     amounts_by_isin = {order["isin"]: order["amount_eur"] for order in persisted["orders"]}
     assert amounts_by_isin["IE00B5BMR087"] == 1050
     assert amounts_by_isin["TBD_EXUS"] == 450
     assert amounts_by_isin["LU0290358497"] == 875
     assert amounts_by_isin["DE000A0S9GB0"] == 125
+
+    amounts_by_instrument_id = {order["instrument_id"]: order["amount_eur"] for order in persisted["orders"]}
+    assert amounts_by_instrument_id["sp500_acc"] == 1050
+    assert amounts_by_instrument_id["ex_us_equity"] == 450
+    assert amounts_by_instrument_id["xeon"] == 875
+    assert amounts_by_instrument_id["xetra_gold"] == 125

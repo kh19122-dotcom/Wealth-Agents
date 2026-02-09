@@ -396,6 +396,7 @@ def _build_orders(allocations: list[InstrumentAllocation]) -> list[dict[str, Any
         orders.append(
             {
                 "side": "BUY",
+                "instrument_id": item.instrument_id,
                 "isin": item.isin,
                 "name": item.name,
                 "bucket": item.bucket,
@@ -429,11 +430,11 @@ def _write_report(
     lines.append("")
     lines.append("## Allocation")
     lines.append("")
-    lines.append("| bucket | isin | name | amount_eur |")
-    lines.append("|---|---|---|---:|")
+    lines.append("| bucket | instrument_id | isin | name | amount_eur |")
+    lines.append("|---|---|---|---|---:|")
     for order in payload["orders"]:
         lines.append(
-            f"| {order['bucket']} | {order['isin']} | {order['name']} | {order['amount_eur']} |"
+            f"| {order['bucket']} | {order['instrument_id']} | {order['isin']} | {order['name']} | {order['amount_eur']} |"
         )
     lines.append("")
     lines.append("## Notes")

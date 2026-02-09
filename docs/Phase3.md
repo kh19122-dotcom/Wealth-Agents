@@ -50,4 +50,4 @@ policy:
 - `budget_eur`
 - `policy_hash`
 - `assumptions` (rounding, remainder, buy-only, allow_sells=false, min_trade_eur)
-- `orders` (`[{side, isin, name, bucket, amount_eur}]`)
+- `orders` (`[{side, instrument_id, isin, name, bucket, amount_eur}]`)
