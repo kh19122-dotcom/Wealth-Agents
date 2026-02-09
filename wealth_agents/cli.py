@@ -11,6 +11,7 @@ from .ips import (
     init_ips_files,
 )
 from .orders import propose_monthly_orders
+from .policy_review import apply_review_proposal, review_policy
 from .report import generate_weekly_report
 from .rss import collect_from_feeds_with_stats
 from .storage import append_unique_records, validate_jsonl
@@ -70,6 +71,20 @@ def build_parser() -> argparse.ArgumentParser:
     propose_orders.add_argument("--policy", default="data/policy/policy.yml")
     propose_orders.add_argument("--orders-dir", default="orders")
     propose_orders.add_argument("--reports-dir", default="reports")
+
+    policy_review = sub.add_parser("policy-review", help="Generate quarterly-cadence policy adjustment proposal")
+    policy_review.add_argument("--week", required=True, help="ISO week format YYYY-Www, e.g., 2026-W06")
+    policy_review.add_argument("--policy", default="data/policy/policy.yml")
+    policy_review.add_argument("--weekly-aggregates", default="data/meta/weekly_aggregates.jsonl")
+    policy_review.add_argument("--report-dir", default="reports")
+    policy_review.add_argument("--patch-dir", default="data/policy")
+    policy_review.add_argument("--apply-history", default="data/policy/policy_apply_history.jsonl")
+    policy_review.add_argument("--apply", action="store_true", help="Apply first generated proposal to policy.yml")
+    policy_review.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm policy mutation for --apply (required in non-interactive mode)",
+    )
 
     return parser
 
@@ -165,6 +180,33 @@ def main() -> int:
                 orders_path,
                 report_path,
             )
+            return 0
+
+        if args.command == "policy-review":
+            result = review_policy(
+                week=args.week,
+                policy_path=args.policy,
+                weekly_aggregates_path=args.weekly_aggregates,
+                report_dir=args.report_dir,
+                patch_dir=args.patch_dir,
+                apply_history_path=args.apply_history,
+            )
+            logging.getLogger(__name__).info(
+                "Policy review complete: report=%s patch=%s proposal_generated=%s apply_allowed=%s",
+                result.report_path,
+                result.patch_path,
+                result.proposal_generated,
+                result.apply_guardrail.allowed,
+            )
+
+            if args.apply:
+                applied, message = apply_review_proposal(
+                    review_result=result,
+                    policy_path=args.policy,
+                    apply_history_path=args.apply_history,
+                    require_yes=args.yes,
+                )
+                logging.getLogger(__name__).info("Policy apply: applied=%s detail=%s", applied, message)
             return 0
     except (ValueError, RuntimeError) as exc:
         logging.getLogger(__name__).error(str(exc))
