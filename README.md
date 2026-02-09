@@ -29,6 +29,10 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
   - `ips init` creates input template/checklist
   - `ips draft` generates conservative/balanced/aggressive policy candidates
   - `ips finalize` writes approved policy and audit history
+- Phase 3 order proposal workflow:
+  - `propose-orders` reads `data/policy/policy.yml` and emits monthly BUY-only order proposals
+  - outputs JSON proposal in `orders/proposed_<YYYY-MM>.json`
+  - outputs human-readable report in `reports/orders_<YYYY-MM>.md`
 - CLI commands:
   - `python -m wealth_agents collect --config config/feeds.yml`
   - `python -m wealth_agents ingest --path inputs --source manual`
@@ -37,6 +41,7 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
   - `python -m wealth_agents ips init`
   - `python -m wealth_agents ips draft --input data/policy/ips_inputs.yml`
   - `python -m wealth_agents ips finalize --choice balanced`
+  - `python -m wealth_agents propose-orders --month 2026-03`
 
 ## Setup (uv)
 
@@ -143,6 +148,15 @@ Finalize one candidate:
 uv run python -m wealth_agents ips finalize --choice balanced
 ```
 
+Propose monthly BUY orders from finalized policy:
+
+```bash
+uv run python -m wealth_agents propose-orders --month 2026-03
+uv run python -m wealth_agents propose-orders --month 2026-03 --amount 2500
+```
+
+Phase 3 design details and output schema: `docs/Phase3.md`.
+
 ## Project Structure
 
 ```
@@ -152,6 +166,7 @@ wealth_agents/
   cli.py
   ingest.py
   ips.py
+  orders.py
   policy.py
   rss.py
   storage.py
@@ -164,6 +179,7 @@ config/
 data/
   policy/
   raw/
+orders/
 reports/
 tests/
 ```
