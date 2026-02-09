@@ -10,6 +10,7 @@ from .ips import (
     finalize_policy,
     init_ips_files,
 )
+from .orders import propose_monthly_orders
 from .report import generate_weekly_report
 from .rss import collect_from_feeds_with_stats
 from .storage import append_unique_records, validate_jsonl
@@ -62,6 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
     ips_finalize.add_argument("--draft", default="data/policy/policy_draft.yml")
     ips_finalize.add_argument("--policy-output", default="data/policy/policy.yml")
     ips_finalize.add_argument("--history", default="data/policy/policy_history.jsonl")
+
+    propose_orders = sub.add_parser("propose-orders", help="Propose monthly BUY orders from policy")
+    propose_orders.add_argument("--month", required=True, help="Month in YYYY-MM format, e.g., 2026-03")
+    propose_orders.add_argument("--amount", type=float, default=None, help="Optional budget override in EUR")
+    propose_orders.add_argument("--policy", default="data/policy/policy.yml")
+    propose_orders.add_argument("--orders-dir", default="orders")
+    propose_orders.add_argument("--reports-dir", default="reports")
 
     return parser
 
@@ -143,6 +151,21 @@ def main() -> int:
                     policy_hash,
                 )
                 return 0
+
+        if args.command == "propose-orders":
+            orders_path, report_path, _ = propose_monthly_orders(
+                month=args.month,
+                amount_eur=args.amount,
+                policy_path=args.policy,
+                orders_dir=args.orders_dir,
+                reports_dir=args.reports_dir,
+            )
+            logging.getLogger(__name__).info(
+                "Order proposal complete: orders=%s report=%s",
+                orders_path,
+                report_path,
+            )
+            return 0
     except (ValueError, RuntimeError) as exc:
         logging.getLogger(__name__).error(str(exc))
         return 1
