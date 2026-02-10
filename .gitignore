@@ -27,3 +27,8 @@ orders/
 # Phase 3.7 generated artifacts
 data/prices/
 sim/
+
+# local logs
+log/
+log
+
