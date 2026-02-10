@@ -29,6 +29,12 @@ class InstrumentAllocation:
     amount_eur: int
 
 
+@dataclass
+class OrderComputationResult:
+    payload: dict[str, Any]
+    min_trade_rollups: list[dict[str, Any]]
+
+
 def propose_monthly_orders(
     month: str,
     amount_eur: float | None = None,
@@ -36,10 +42,41 @@ def propose_monthly_orders(
     orders_dir: str = DEFAULT_ORDERS_DIR,
     reports_dir: str = DEFAULT_REPORTS_DIR,
 ) -> tuple[Path, Path, dict[str, Any]]:
-    normalized_month = _validate_month(month)
     policy_doc = read_yaml(policy_path)
-    policy = _read_policy_section(policy_doc, policy_path)
-    policy_hash = _read_policy_hash(policy_doc, policy_path)
+    computed = compute_monthly_order_payload(
+        month=month,
+        policy_doc=policy_doc,
+        amount_eur=amount_eur,
+        policy_path_for_errors=policy_path,
+    )
+    payload = computed.payload
+
+    normalized_month = payload["month"]
+    budget_eur = payload["budget_eur"]
+    policy_hash = payload["policy_hash"]
+    orders_path = Path(orders_dir) / f"proposed_{normalized_month}.json"
+    reports_path = Path(reports_dir) / f"orders_{normalized_month}.md"
+    _write_json(orders_path, payload)
+    _write_report(
+        path=reports_path,
+        month=normalized_month,
+        budget_eur=budget_eur,
+        policy_hash=policy_hash,
+        payload=payload,
+        min_trade_rollups=computed.min_trade_rollups,
+    )
+    return orders_path, reports_path, payload
+
+
+def compute_monthly_order_payload(
+    month: str,
+    policy_doc: dict[str, Any],
+    amount_eur: float | None = None,
+    policy_path_for_errors: str = DEFAULT_POLICY_PATH,
+) -> OrderComputationResult:
+    normalized_month = _validate_month(month)
+    policy = _read_policy_section(policy_doc, policy_path_for_errors)
+    policy_hash = _read_policy_hash(policy_doc, policy_path_for_errors)
     currency = _read_currency(policy_doc)
     if currency != "EUR":
         raise ValueError("Phase 3 MVP currently supports EUR-only policies.")
@@ -81,19 +118,7 @@ def propose_monthly_orders(
         },
         "orders": final_orders,
     }
-
-    orders_path = Path(orders_dir) / f"proposed_{normalized_month}.json"
-    reports_path = Path(reports_dir) / f"orders_{normalized_month}.md"
-    _write_json(orders_path, payload)
-    _write_report(
-        path=reports_path,
-        month=normalized_month,
-        budget_eur=budget_eur,
-        policy_hash=policy_hash,
-        payload=payload,
-        min_trade_rollups=min_trade_rollups,
-    )
-    return orders_path, reports_path, payload
+    return OrderComputationResult(payload=payload, min_trade_rollups=min_trade_rollups)
 
 
 def _validate_month(month: str) -> str:

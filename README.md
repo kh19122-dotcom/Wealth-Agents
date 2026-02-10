@@ -29,6 +29,11 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
   - `ips init` creates input template/checklist
   - `ips draft` generates conservative/balanced/aggressive policy candidates
   - `ips finalize` writes approved policy and audit history
+- Phase 2.5 policy review workflow:
+  - `policy-review` reads weekly aggregates + current policy and emits a proposal-only quarterly review
+  - outputs markdown review in `reports/policy_review_<YYYY-Www>.md`
+  - outputs patch artifact in `data/policy/policy_patch_<YYYY-Www>.yml`
+  - optional `--apply` mutates policy only when quarterly apply guardrail allows (requires confirmation / `--yes`)
 - Phase 3 order proposal workflow:
   - `propose-orders` reads `data/policy/policy.yml` and emits monthly BUY-only order proposals
   - outputs JSON proposal in `orders/proposed_<YYYY-MM>.json`
@@ -41,6 +46,8 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
   - `python -m wealth_agents ips init`
   - `python -m wealth_agents ips draft --input data/policy/ips_inputs.yml`
   - `python -m wealth_agents ips finalize --choice balanced`
+  - `python -m wealth_agents policy-review --week 2026-W06`
+  - `python -m wealth_agents policy-review --week 2026-W06 --apply --yes`
   - `python -m wealth_agents propose-orders --month 2026-03`
 
 ## Setup (uv)
@@ -148,6 +155,13 @@ Finalize one candidate:
 uv run python -m wealth_agents ips finalize --choice balanced
 ```
 
+Run proposal-only policy review (quarterly cadence guardrail):
+
+```bash
+uv run python -m wealth_agents policy-review --week 2026-W06
+uv run python -m wealth_agents policy-review --week 2026-W06 --apply --yes
+```
+
 Propose monthly BUY orders from finalized policy:
 
 ```bash
@@ -156,6 +170,7 @@ uv run python -m wealth_agents propose-orders --month 2026-03 --amount 2500
 ```
 
 Phase 3 design details and output schema: `docs/Phase3.md`.
+Phase 2.5 policy review design details: `docs/Phase25.md`.
 
 ## Project Structure
 
@@ -167,6 +182,7 @@ wealth_agents/
   ingest.py
   ips.py
   orders.py
+  policy_review.py
   policy.py
   rss.py
   storage.py
