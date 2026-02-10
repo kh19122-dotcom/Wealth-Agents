@@ -108,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
     simulate.add_argument("--initial", type=float, default=0.0, help="Initial cash in EUR (default: 0)")
     simulate.add_argument("--policy", default="data/policy/policy.yml", help="Policy YAML path")
     simulate.add_argument("--prices-dir", default="data/prices", help="Local price cache root directory")
+    simulate.add_argument(
+        "--allow-short-history",
+        action="store_true",
+        help="Allow late-starting tickers by shifting simulation start to the latest common first-available month.",
+    )
     simulate.add_argument("--sim-dir", default="sim", help="Simulation JSON output directory")
     simulate.add_argument("--reports-dir", default="reports", help="Simulation report output directory")
 
@@ -230,19 +235,43 @@ def main() -> int:
                 prices_dir=args.prices_dir,
             )
             logging.getLogger(__name__).info(
-                "Price fetch complete: provider=%s tickers=%s downloaded_rows=%s",
+                "Price fetch summary: tickers_succeeded=%s tickers_skipped_empty=%s tickers_failed=%s total_rows_downloaded=%s",
+                summary["tickers_succeeded"],
+                summary["tickers_skipped_empty"],
+                summary["tickers_failed"],
+                summary["total_rows_downloaded"],
+            )
+            logging.getLogger(__name__).info(
+                "Price fetch complete: provider=%s tickers=%s",
                 summary["provider"],
                 summary["tickers_count"],
-                summary["downloaded_rows"],
             )
             for row in summary["tickers"]:
-                logging.getLogger(__name__).info(
-                    "Price cache: ticker=%s rows_total=%s rows_appended=%s downloaded_rows=%s",
-                    row["ticker"],
-                    row["rows_total"],
-                    row["rows_appended"],
-                    row["downloaded_rows"],
-                )
+                status = str(row.get("status") or "unknown")
+                if status == "failed":
+                    logging.getLogger(__name__).warning(
+                        "Price cache: ticker=%s status=%s error=%s",
+                        row["ticker"],
+                        status,
+                        row.get("error"),
+                    )
+                elif status == "skipped_empty":
+                    logging.getLogger(__name__).warning(
+                        "Price cache: ticker=%s status=%s had_existing_cache=%s rows_total=%s",
+                        row["ticker"],
+                        status,
+                        row.get("had_existing_cache"),
+                        row.get("rows_total"),
+                    )
+                else:
+                    logging.getLogger(__name__).info(
+                        "Price cache: ticker=%s status=%s rows_total=%s rows_appended=%s downloaded_rows=%s",
+                        row["ticker"],
+                        status,
+                        row["rows_total"],
+                        row["rows_appended"],
+                        row["downloaded_rows"],
+                    )
             return 0
 
         if args.command == "simulate":
@@ -251,11 +280,23 @@ def main() -> int:
                 end=args.end,
                 monthly=args.monthly,
                 initial=args.initial,
+                allow_short_history=args.allow_short_history,
                 policy_path=args.policy,
                 prices_dir=args.prices_dir,
                 sim_dir=args.sim_dir,
                 reports_dir=args.reports_dir,
             )
+            history_window = payload.get("history_window") or {}
+            if history_window.get("adjusted"):
+                logging.getLogger(__name__).warning(
+                    "Simulation window adjusted: requested=%s..%s effective=%s..%s",
+                    history_window.get("requested_start"),
+                    history_window.get("requested_end"),
+                    history_window.get("effective_start"),
+                    history_window.get("effective_end"),
+                )
+            for warning in payload.get("warnings", []):
+                logging.getLogger(__name__).warning("Simulation warning: %s", warning)
             logging.getLogger(__name__).info(
                 "Simulation complete: snapshots=%s sim=%s report=%s",
                 len(payload.get("snapshots", [])),

@@ -1,21 +1,20 @@
 from __future__ import annotations
 
-from datetime import date
+import logging
 from pathlib import Path
 from typing import Any
 
 from .market_prices import (
-    compute_missing_ranges,
-    fetch_yahoo_adj_close,
     parse_iso_date,
     read_price_cache,
-    write_price_cache,
+    sync_yahoo_price_cache,
 )
 from .policy_instruments import load_policy_and_instruments
 
 
 DEFAULT_POLICY_PATH = "data/policy/policy.yml"
 DEFAULT_PRICES_DIR = "data/prices"
+LOG = logging.getLogger(__name__)
 
 
 def fetch_prices_for_policy(
@@ -45,48 +44,137 @@ def fetch_prices_for_policy(
     provider_dir = Path(prices_dir) / provider_name
     ticker_summaries: list[dict[str, Any]] = []
     total_downloaded_rows = 0
+    tickers_succeeded = 0
+    tickers_skipped_empty = 0
+    tickers_failed = 0
+    tickers_with_existing_cache = 0
 
     for instrument in selected:
         cache_path = provider_dir / f"{instrument.ticker}.csv"
-        existing = read_price_cache(cache_path)
-        missing_ranges = compute_missing_ranges(existing, start_date, end_date)
+        had_existing_cache = cache_path.exists()
+        existing_rows = 0
+        if had_existing_cache:
+            try:
+                existing_rows = len(read_price_cache(cache_path))
+                tickers_with_existing_cache += 1
+            except ValueError as exc:
+                tickers_failed += 1
+                LOG.warning(
+                    "Price fetch failed: ticker=%s invalid existing cache=%s detail=%s",
+                    instrument.ticker,
+                    cache_path,
+                    exc,
+                )
+                ticker_summaries.append(
+                    {
+                        "instrument_id": instrument.instrument_id,
+                        "ticker": instrument.ticker,
+                        "status": "failed",
+                        "rows_total": 0,
+                        "rows_appended": 0,
+                        "downloaded_rows": 0,
+                        "cache_path": str(cache_path),
+                        "had_existing_cache": True,
+                        "error": str(exc),
+                    }
+                )
+                continue
 
-        downloaded: dict[date, float] = {}
-        for range_start, range_end in missing_ranges:
-            fetched = fetch_yahoo_adj_close(
+        try:
+            synced = sync_yahoo_price_cache(
+                cache_path=cache_path,
                 ticker=instrument.ticker,
-                start=range_start,
-                end=range_end,
+                start=start_date,
+                end=end_date,
                 max_retries=3,
             )
-            downloaded.update(fetched)
-
-        merged = dict(existing)
-        merged.update(downloaded)
-
-        if not merged:
-            raise RuntimeError(
-                f"No adjusted-close data was retrieved for ticker '{instrument.ticker}'. "
-                "Verify ticker symbol/provider and requested date range."
+            tickers_succeeded += 1
+            total_downloaded_rows += int(synced["downloaded_rows"])
+            ticker_summaries.append(
+                {
+                    "instrument_id": instrument.instrument_id,
+                    "ticker": instrument.ticker,
+                    "status": "succeeded",
+                    "rows_total": synced["rows_total"],
+                    "rows_appended": synced["rows_appended"],
+                    "downloaded_rows": synced["downloaded_rows"],
+                    "cache_path": synced["cache_path"],
+                    "had_existing_cache": had_existing_cache,
+                }
             )
+            continue
+        except RuntimeError as exc:
+            if _is_empty_download_error(exc):
+                tickers_skipped_empty += 1
+                LOG.warning(
+                    "Price fetch skipped (empty data): ticker=%s had_existing_cache=%s detail=%s",
+                    instrument.ticker,
+                    had_existing_cache,
+                    exc,
+                )
+                ticker_summaries.append(
+                    {
+                        "instrument_id": instrument.instrument_id,
+                        "ticker": instrument.ticker,
+                        "status": "skipped_empty",
+                        "rows_total": existing_rows,
+                        "rows_appended": 0,
+                        "downloaded_rows": 0,
+                        "cache_path": str(cache_path),
+                        "had_existing_cache": had_existing_cache,
+                    }
+                )
+                continue
 
-        rows_before = len(existing)
-        rows_after = len(merged)
-        rows_appended = max(0, rows_after - rows_before)
-        total_downloaded_rows += len(downloaded)
+            tickers_failed += 1
+            LOG.warning(
+                "Price fetch failed: ticker=%s detail=%s",
+                instrument.ticker,
+                exc,
+            )
+            ticker_summaries.append(
+                {
+                    "instrument_id": instrument.instrument_id,
+                    "ticker": instrument.ticker,
+                    "status": "failed",
+                    "rows_total": existing_rows,
+                    "rows_appended": 0,
+                    "downloaded_rows": 0,
+                    "cache_path": str(cache_path),
+                    "had_existing_cache": had_existing_cache,
+                    "error": str(exc),
+                }
+            )
+            continue
+        except Exception as exc:
+            tickers_failed += 1
+            LOG.warning(
+                "Price fetch failed: ticker=%s detail=%s",
+                instrument.ticker,
+                exc,
+            )
+            ticker_summaries.append(
+                {
+                    "instrument_id": instrument.instrument_id,
+                    "ticker": instrument.ticker,
+                    "status": "failed",
+                    "rows_total": existing_rows,
+                    "rows_appended": 0,
+                    "downloaded_rows": 0,
+                    "cache_path": str(cache_path),
+                    "had_existing_cache": had_existing_cache,
+                    "error": str(exc),
+                }
+            )
+            continue
 
-        if (not cache_path.exists()) or downloaded:
-            write_price_cache(cache_path, merged)
-
-        ticker_summaries.append(
-            {
-                "instrument_id": instrument.instrument_id,
-                "ticker": instrument.ticker,
-                "rows_total": rows_after,
-                "rows_appended": rows_appended,
-                "downloaded_rows": len(downloaded),
-                "cache_path": str(cache_path),
-            }
+    if tickers_succeeded == 0 and tickers_with_existing_cache == 0:
+        raise RuntimeError(
+            "Price fetch failed: no ticker produced data and no usable existing cache was found. "
+            f"tickers_succeeded={tickers_succeeded} "
+            f"tickers_skipped_empty={tickers_skipped_empty} "
+            f"tickers_failed={tickers_failed} "
+            f"total_rows_downloaded={total_downloaded_rows}"
         )
 
     return {
@@ -94,6 +182,19 @@ def fetch_prices_for_policy(
         "start": start_date.isoformat(),
         "end": end_date.isoformat(),
         "tickers_count": len(ticker_summaries),
+        "tickers_succeeded": tickers_succeeded,
+        "tickers_skipped_empty": tickers_skipped_empty,
+        "tickers_failed": tickers_failed,
+        "total_rows_downloaded": total_downloaded_rows,
         "downloaded_rows": total_downloaded_rows,
         "tickers": ticker_summaries,
     }
+
+
+def _is_empty_download_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "empty price data" in text
+        or "empty adjusted-close data" in text
+        or "no adjusted-close data was retrieved" in text
+    )

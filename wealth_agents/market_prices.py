@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 import math
 from pathlib import Path
 import time
-from typing import Iterable
+from typing import Any, Iterable
 
 
 def parse_iso_date(value: str, field_name: str) -> date:
@@ -174,6 +174,80 @@ def fetch_yahoo_adj_close(
     raise RuntimeError(f"Failed to fetch prices for ticker '{ticker}'.")
 
 
+def sync_yahoo_price_cache(
+    cache_path: Path,
+    ticker: str,
+    start: date,
+    end: date,
+    max_retries: int = 3,
+) -> dict[str, Any]:
+    existing = read_price_cache(cache_path)
+    missing_ranges = compute_missing_ranges(existing, start, end)
+
+    downloaded: dict[date, float] = {}
+    for range_start, range_end in missing_ranges:
+        fetched = fetch_yahoo_adj_close(
+            ticker=ticker,
+            start=range_start,
+            end=range_end,
+            max_retries=max_retries,
+        )
+        downloaded.update(fetched)
+
+    merged = dict(existing)
+    merged.update(downloaded)
+    if not merged:
+        raise RuntimeError(
+            f"No adjusted-close data was retrieved for ticker '{ticker}'. "
+            "Verify ticker symbol/provider and requested date range."
+        )
+
+    rows_before = len(existing)
+    rows_after = len(merged)
+    rows_appended = max(0, rows_after - rows_before)
+    if (not cache_path.exists()) or downloaded:
+        write_price_cache(cache_path, merged)
+
+    return {
+        "ticker": ticker,
+        "rows_total": rows_after,
+        "rows_appended": rows_appended,
+        "downloaded_rows": len(downloaded),
+        "series": merged,
+        "cache_path": str(cache_path),
+    }
+
+
+def get_yahoo_ticker_currency(
+    ticker: str,
+    max_retries: int = 2,
+) -> str | None:
+    try:
+        import yfinance as yf
+    except ImportError:
+        return None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            instrument = yf.Ticker(ticker)
+            currency = _extract_currency(getattr(instrument, "fast_info", None))
+            if currency:
+                return currency
+
+            info = getattr(instrument, "info", None)
+            if isinstance(info, dict):
+                currency = _normalize_currency(info.get("currency"))
+                if currency:
+                    return currency
+            return None
+        except Exception:  # pragma: no cover - depends on provider/network behavior
+            if attempt < max_retries:
+                time.sleep(0.3 * (2 ** (attempt - 1)))
+                continue
+            return None
+    return None
+
+
 def month_end_prices(
     daily_prices: dict[date, float],
     start_month: str,
@@ -196,6 +270,41 @@ def month_end_prices(
 
 def _format_price(value: float) -> str:
     return f"{float(value):.10f}"
+
+
+def _extract_currency(source: Any) -> str | None:
+    if source is None:
+        return None
+
+    if isinstance(source, dict):
+        return _normalize_currency(source.get("currency"))
+
+    getter = getattr(source, "get", None)
+    if callable(getter):
+        try:
+            candidate = getter("currency")
+        except Exception:  # pragma: no cover - defensive for third-party object behavior
+            candidate = None
+        currency = _normalize_currency(candidate)
+        if currency:
+            return currency
+
+    try:
+        candidate = source["currency"]
+    except Exception:  # pragma: no cover - defensive for third-party object behavior
+        candidate = None
+    currency = _normalize_currency(candidate)
+    if currency:
+        return currency
+
+    return _normalize_currency(getattr(source, "currency", None))
+
+
+def _normalize_currency(value: Any) -> str | None:
+    text = str(value or "").strip().upper()
+    if len(text) != 3:
+        return None
+    return text
 
 
 def _range_has_weekday(start: date, end: date) -> bool:
