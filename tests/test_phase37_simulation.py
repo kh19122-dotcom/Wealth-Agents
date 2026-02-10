@@ -4,13 +4,27 @@ from datetime import date
 import math
 from pathlib import Path
 
+import pytest
 import yaml
 
 from wealth_agents.market_prices import month_end_prices, write_price_cache
-from wealth_agents.simulation import _compute_stats, run_simulation
+from wealth_agents.simulation import _compute_stats, resolve_fx_ticker, run_simulation
 
 
-def _write_policy(path: Path) -> None:
+def _write_policy(
+    path: Path,
+    ticker_a: str = "AAA.DE",
+    ticker_b: str = "BBB.DE",
+    currency_a: str | None = None,
+    currency_b: str | None = None,
+) -> None:
+    data_a = {"provider": "yahoo", "ticker": ticker_a}
+    data_b = {"provider": "yahoo", "ticker": ticker_b}
+    if currency_a:
+        data_a["currency"] = currency_a
+    if currency_b:
+        data_b["currency"] = currency_b
+
     payload = {
         "policy_version": "2026-02-09",
         "created_at": "2026-02-09T00:00:00Z",
@@ -28,7 +42,7 @@ def _write_policy(path: Path) -> None:
                         "isin": "TEST_ISIN_A",
                         "name": "Asset A",
                         "weight_within_bucket": 1.0,
-                        "data": {"provider": "yahoo", "ticker": "AAA.DE"},
+                        "data": data_a,
                     }
                 ],
                 "bucket_b": [
@@ -37,7 +51,7 @@ def _write_policy(path: Path) -> None:
                         "isin": "TEST_ISIN_B",
                         "name": "Asset B",
                         "weight_within_bucket": 1.0,
-                        "data": {"provider": "yahoo", "ticker": "BBB.DE"},
+                        "data": data_b,
                     }
                 ],
             },
@@ -114,8 +128,16 @@ def test_simulation_smoke_with_monotonic_synthetic_prices(tmp_path: Path):
     assert "CAGR (TWR, cashflow-adjusted)" in report_text
     assert "Annualized volatility (TWR)" in report_text
     assert "Max drawdown (TWR)" in report_text
+    assert "## Events" in report_text
     snapshots = payload["snapshots"]
     assert len(snapshots) == 6
+
+    for snapshot in snapshots:
+        events = snapshot["events"]
+        assert [event["type"] for event in events] == ["contribution", "rebalance", "orders"]
+        assert events[0]["amount"] == 100.0
+        assert events[1]["reason"] == "quarterly"
+        assert events[2]["count"] == len(events[2]["orders"])
 
     holdings_a = [row["holdings"]["AAA.DE"] for row in snapshots]
     holdings_b = [row["holdings"]["BBB.DE"] for row in snapshots]
@@ -146,6 +168,224 @@ def test_twr_drawdown_uses_growth_index_not_raw_total_value():
     assert stats["cagr"] is not None
     assert stats["max_drawdown"] < 0.0
     assert math.isclose(float(stats["max_drawdown"]), float(expected["max_drawdown"]), rel_tol=1e-9, abs_tol=1e-9)
+
+
+def test_resolve_fx_ticker_supports_direct_and_inverse_modes():
+    assert resolve_fx_ticker("GBP") == ("GBPEUR=X", False)
+    assert resolve_fx_ticker("USD", ticker_exists=lambda ticker: ticker == "USDEUR=X") == ("USDEUR=X", False)
+    assert resolve_fx_ticker("CHF", ticker_exists=lambda ticker: ticker == "EURCHF=X") == ("EURCHF=X", True)
+    with pytest.raises(ValueError, match="Unable to resolve Yahoo FX ticker"):
+        resolve_fx_ticker("CHF", ticker_exists=lambda ticker: False)
+
+
+def test_simulation_applies_fx_conversion_for_gbp_ticker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    policy_path = tmp_path / "data/policy/policy.yml"
+    _write_policy(policy_path, ticker_a="AAA.L", ticker_b="BBB.DE")
+
+    prices_root = tmp_path / "data/prices/yahoo"
+    write_price_cache(
+        prices_root / "AAA.L.csv",
+        {
+            date(2024, 1, 31): 100.0,
+            date(2024, 2, 29): 100.0,
+            date(2024, 3, 29): 100.0,
+        },
+    )
+    write_price_cache(
+        prices_root / "BBB.DE.csv",
+        {
+            date(2024, 1, 31): 100.0,
+            date(2024, 2, 29): 100.0,
+            date(2024, 3, 29): 100.0,
+        },
+    )
+    # Pre-populate FX cache to avoid network and guarantee deterministic month-end rates.
+    write_price_cache(
+        tmp_path / "data/prices/yahoo_fx/GBPEUR=X.csv",
+        {
+            date(2024, 1, 1): 1.0,
+            date(2024, 1, 31): 1.0,
+            date(2024, 2, 29): 1.2,
+            date(2024, 3, 31): 1.4,
+        },
+    )
+
+    monkeypatch.setattr(
+        "wealth_agents.simulation.get_yahoo_ticker_currency",
+        lambda ticker, max_retries=2: "GBP" if ticker == "AAA.L" else "EUR",
+    )
+    _, _, payload_fx = run_simulation(
+        start="2024-01",
+        end="2024-03",
+        monthly=100.0,
+        initial=0.0,
+        policy_path=str(policy_path),
+        prices_dir=str(tmp_path / "data/prices"),
+        sim_dir=str(tmp_path / "sim_fx"),
+        reports_dir=str(tmp_path / "reports_fx"),
+    )
+
+    second_snapshot = payload_fx["snapshots"][1]
+    assert second_snapshot["prices_local"]["AAA.L"] == 100.0
+    assert second_snapshot["prices_eur"]["AAA.L"] == 120.0
+    assert second_snapshot["fx_rates"]["GBP"] == 1.2
+    assert payload_fx["fx"]["conversions"] == [{"currency": "GBP", "fx_ticker": "GBPEUR=X", "invert": False}]
+
+    monkeypatch.setattr(
+        "wealth_agents.simulation.get_yahoo_ticker_currency",
+        lambda ticker, max_retries=2: "EUR",
+    )
+    _, _, payload_no_fx = run_simulation(
+        start="2024-01",
+        end="2024-03",
+        monthly=100.0,
+        initial=0.0,
+        policy_path=str(policy_path),
+        prices_dir=str(tmp_path / "data/prices"),
+        sim_dir=str(tmp_path / "sim_no_fx"),
+        reports_dir=str(tmp_path / "reports_no_fx"),
+    )
+
+    assert payload_fx["snapshots"][-1]["total_value"] > payload_no_fx["snapshots"][-1]["total_value"]
+
+
+def test_simulation_uses_policy_currency_override_over_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    policy_path = tmp_path / "data/policy/policy.yml"
+    _write_policy(policy_path, ticker_a="AAA.L", ticker_b="BBB.DE", currency_a="GBP")
+
+    prices_root = tmp_path / "data/prices/yahoo"
+    write_price_cache(
+        prices_root / "AAA.L.csv",
+        {
+            date(2024, 1, 31): 100.0,
+            date(2024, 2, 29): 100.0,
+            date(2024, 3, 29): 100.0,
+        },
+    )
+    write_price_cache(
+        prices_root / "BBB.DE.csv",
+        {
+            date(2024, 1, 31): 100.0,
+            date(2024, 2, 29): 100.0,
+            date(2024, 3, 29): 100.0,
+        },
+    )
+    write_price_cache(
+        tmp_path / "data/prices/yahoo_fx/GBPEUR=X.csv",
+        {
+            date(2024, 1, 31): 1.1,
+            date(2024, 2, 29): 1.2,
+            date(2024, 3, 31): 1.3,
+        },
+    )
+    write_price_cache(
+        tmp_path / "data/prices/yahoo_fx/USDEUR=X.csv",
+        {
+            date(2024, 1, 31): 0.8,
+            date(2024, 2, 29): 0.9,
+            date(2024, 3, 31): 1.0,
+        },
+    )
+
+    metadata_calls: list[str] = []
+
+    def fake_metadata_currency(ticker: str, max_retries: int = 2) -> str:
+        metadata_calls.append(ticker)
+        return "USD" if ticker == "AAA.L" else "EUR"
+
+    monkeypatch.setattr("wealth_agents.simulation.get_yahoo_ticker_currency", fake_metadata_currency)
+
+    _, report_path, payload = run_simulation(
+        start="2024-01",
+        end="2024-03",
+        monthly=100.0,
+        initial=0.0,
+        policy_path=str(policy_path),
+        prices_dir=str(tmp_path / "data/prices"),
+        sim_dir=str(tmp_path / "sim_policy_fx"),
+        reports_dir=str(tmp_path / "reports_policy_fx"),
+    )
+
+    assert "AAA.L" not in metadata_calls
+    assert payload["snapshots"][1]["prices_local"]["AAA.L"] == 100.0
+    assert payload["snapshots"][1]["prices_eur"]["AAA.L"] == 120.0
+    assert payload["snapshots"][1]["fx_rates"]["GBP"] == 1.2
+    assert payload["fx"]["conversions"] == [{"currency": "GBP", "fx_ticker": "GBPEUR=X", "invert": False}]
+    assert payload["fx"]["currency_sources"]["GBP"] == "policy"
+
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "| GBP | GBPEUR=X | false | policy |" in report_text
+
+
+def test_simulation_allow_short_history_adjusts_effective_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    policy_path = tmp_path / "data/policy/policy.yml"
+    _write_policy(policy_path, ticker_a="AAA.DE", ticker_b="BBB.DE")
+
+    prices_root = tmp_path / "data/prices/yahoo"
+    write_price_cache(
+        prices_root / "AAA.DE.csv",
+        {
+            date(2024, 1, 31): 100.0,
+            date(2024, 2, 29): 101.0,
+            date(2024, 3, 29): 102.0,
+            date(2024, 4, 30): 103.0,
+            date(2024, 5, 31): 104.0,
+            date(2024, 6, 28): 105.0,
+        },
+    )
+    # BBB starts later (no Jan/Feb), which should trigger effective_start adjustment.
+    write_price_cache(
+        prices_root / "BBB.DE.csv",
+        {
+            date(2024, 3, 29): 200.0,
+            date(2024, 4, 30): 201.0,
+            date(2024, 5, 31): 202.0,
+            date(2024, 6, 28): 203.0,
+        },
+    )
+
+    monkeypatch.setattr(
+        "wealth_agents.simulation.get_yahoo_ticker_currency",
+        lambda ticker, max_retries=2: "EUR",
+    )
+
+    with pytest.raises(ValueError, match="missing required month-end prices"):
+        run_simulation(
+            start="2024-01",
+            end="2024-06",
+            monthly=100.0,
+            initial=0.0,
+            policy_path=str(policy_path),
+            prices_dir=str(tmp_path / "data/prices"),
+            sim_dir=str(tmp_path / "sim_strict"),
+            reports_dir=str(tmp_path / "reports_strict"),
+        )
+
+    sim_path, report_path, payload = run_simulation(
+        start="2024-01",
+        end="2024-06",
+        monthly=100.0,
+        initial=0.0,
+        allow_short_history=True,
+        policy_path=str(policy_path),
+        prices_dir=str(tmp_path / "data/prices"),
+        sim_dir=str(tmp_path / "sim_adjusted"),
+        reports_dir=str(tmp_path / "reports_adjusted"),
+    )
+
+    assert sim_path.name == "portfolio_2024-03_2024-06.json"
+    assert report_path.name == "sim_2024-03_2024-06.md"
+    assert payload["start"] == "2024-03"
+    assert payload["history_window"]["adjusted"] is True
+    assert payload["history_window"]["effective_start"] == "2024-03"
+    assert payload["history_window"]["first_available_by_ticker"]["AAA.DE"]["first_month"] == "2024-01"
+    assert payload["history_window"]["first_available_by_ticker"]["BBB.DE"]["first_month"] == "2024-03"
+    assert len(payload["snapshots"]) == 4
+
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "Requested window: 2024-01 to 2024-06" in report_text
+    assert "Effective window: 2024-03 to 2024-06" in report_text
+    assert "| BBB.DE | 2024-03-29 | 2024-03 |" in report_text
 
 
 def _twr_stats_from_values(total_values: list[float], monthly_contribution: float) -> dict[str, float | None]:

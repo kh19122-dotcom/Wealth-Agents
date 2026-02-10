@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
 import json
 import math
 from pathlib import Path
 from statistics import pstdev
-from typing import Any
+from typing import Any, Callable
 
-from .market_prices import month_end_prices, month_strings_inclusive, parse_iso_month, read_price_cache
+from .market_prices import (
+    get_yahoo_ticker_currency,
+    month_end_prices,
+    month_strings_inclusive,
+    parse_iso_month,
+    read_price_cache,
+    sync_yahoo_price_cache,
+)
 from .orders import compute_monthly_order_payload
 from .policy import validate_allocation_sum, validate_band_pct
 from .policy_instruments import PolicyInstrument, load_policy_and_instruments
@@ -17,6 +25,7 @@ DEFAULT_PRICES_DIR = "data/prices"
 DEFAULT_SIM_DIR = "sim"
 DEFAULT_REPORTS_DIR = "reports"
 SUPPORTED_PROVIDER = "yahoo"
+FX_CACHE_DIRNAME = "yahoo_fx"
 
 
 def run_simulation(
@@ -24,11 +33,14 @@ def run_simulation(
     end: str,
     monthly: float,
     initial: float = 0.0,
+    allow_short_history: bool = False,
     policy_path: str = DEFAULT_POLICY_PATH,
     prices_dir: str = DEFAULT_PRICES_DIR,
     sim_dir: str = DEFAULT_SIM_DIR,
     reports_dir: str = DEFAULT_REPORTS_DIR,
 ) -> tuple[Path, Path, dict[str, Any]]:
+    requested_start = start
+    requested_end = end
     _validate_month_range(start, end)
     if monthly < 0:
         raise ValueError("monthly must be non-negative.")
@@ -44,22 +56,47 @@ def run_simulation(
     instrument_by_id = {row.instrument_id: row for row in provider_instruments}
     target_weights = _effective_target_weights(policy, provider_instruments)
 
-    month_index = month_strings_inclusive(start, end)
-    prices_by_ticker_by_month = _load_month_end_prices(
+    sorted_instruments = sorted(provider_instruments, key=lambda item: item.ticker)
+    price_window = _load_month_end_prices(
         start=start,
         end=end,
         instruments=provider_instruments,
         prices_dir=Path(prices_dir) / SUPPORTED_PROVIDER,
+        allow_short_history=allow_short_history,
     )
+    effective_start = price_window["effective_start"]
+    prices_by_ticker_by_month = price_window["prices"]
+    first_available_by_ticker = price_window["first_available_by_ticker"]
+    adjusted_window = effective_start != requested_start
+
+    month_index = month_strings_inclusive(effective_start, requested_end)
+    start_date = parse_iso_month(effective_start, "effective_start")
+    end_date = _month_end_date(parse_iso_month(requested_end, "end"))
 
     rebalance_frequency, band_pct = _read_rebalance_settings(policy_doc, policy)
     warnings: list[str] = []
-    non_eur = _non_eur_tickers({row.ticker for row in provider_instruments})
-    if non_eur:
+    if adjusted_window:
         warnings.append(
-            "FX conversion is ignored for MVP. Non-EUR ticker pricing is used as-is: "
-            + ", ".join(non_eur)
+            f"Adjusted simulation start from {requested_start} to {effective_start} due to limited ticker history."
         )
+    currency_by_ticker, currency_source_by_ticker = _detect_ticker_currencies(
+        instruments=sorted_instruments,
+        warnings=warnings,
+    )
+    currency_source_by_currency = _summarize_currency_sources(
+        currency_by_ticker=currency_by_ticker,
+        currency_source_by_ticker=currency_source_by_ticker,
+    )
+    fx_context = _build_fx_context(
+        start=effective_start,
+        end=requested_end,
+        start_date=start_date,
+        end_date=end_date,
+        currencies=sorted({currency_by_ticker[row.ticker] for row in sorted_instruments}),
+        currency_source_by_currency=currency_source_by_currency,
+        prices_dir=Path(prices_dir),
+        warnings=warnings,
+    )
 
     holdings_by_id: dict[str, float] = {instrument_id: 0.0 for instrument_id in sorted(instrument_by_id)}
     cash = float(initial)
@@ -67,23 +104,50 @@ def run_simulation(
     snapshots: list[dict[str, Any]] = []
 
     for month in month_index:
+        month_events: list[dict[str, Any]] = []
         cash += float(monthly)
         contribution_to_date += float(monthly)
-        month_prices = {
+        month_events.append(
+            {
+                "type": "contribution",
+                "amount": _round_float(float(monthly), 8),
+            }
+        )
+        month_prices_local = {
             row.ticker: prices_by_ticker_by_month[row.ticker][month]
-            for row in sorted(provider_instruments, key=lambda item: item.ticker)
+            for row in sorted_instruments
+        }
+        month_fx_rates = _month_fx_rates(
+            month=month,
+            month_prices_local=month_prices_local,
+            currency_by_ticker=currency_by_ticker,
+            fx_context=fx_context,
+            warnings=warnings,
+        )
+        month_prices_eur = {
+            ticker: float(local_price) * float(month_fx_rates[currency_by_ticker[ticker]])
+            for ticker, local_price in month_prices_local.items()
         }
 
         budget_whole = int(cash)
+        month_order_details: list[dict[str, Any]] = []
+        rebalance_due = _is_rebalance_month(month, rebalance_frequency)
+        rebalance_triggered = False
+        rebalance_underweights: list[dict[str, Any]] = []
         if budget_whole > 0:
-            if _is_rebalance_month(month, rebalance_frequency):
+            if rebalance_due:
                 rebalance_weights = _underweight_rebalance_weights(
                     holdings_by_id=holdings_by_id,
-                    month_prices=month_prices,
+                    month_prices=month_prices_eur,
                     instrument_by_id=instrument_by_id,
                     target_weights=target_weights,
                     band_pct=band_pct,
                 )
+                rebalance_underweights = _format_underweights_for_event(
+                    rebalance_weights=rebalance_weights,
+                    instrument_by_id=instrument_by_id,
+                )
+                rebalance_triggered = bool(rebalance_weights)
                 if rebalance_weights:
                     try:
                         rebalance_orders = _build_orders_for_weights(
@@ -104,13 +168,14 @@ def run_simulation(
                         else:
                             raise
                     cash_box = [cash]
-                    _execute_orders(
+                    executed_rebalance_orders = _execute_orders(
                         holdings_by_id=holdings_by_id,
                         cash_ref=cash_box,
                         orders=rebalance_orders,
-                        month_prices=month_prices,
+                        month_prices=month_prices_eur,
                         instrument_by_id=instrument_by_id,
                     )
+                    month_order_details.extend(executed_rebalance_orders)
                     cash = cash_box[0]
 
             budget_whole = int(cash)
@@ -123,22 +188,52 @@ def run_simulation(
                     warnings=warnings,
                 )
                 cash_box = [cash]
-                _execute_orders(
+                executed_monthly_orders = _execute_orders(
                     holdings_by_id=holdings_by_id,
                     cash_ref=cash_box,
                     orders=monthly_orders,
-                    month_prices=month_prices,
+                    month_prices=month_prices_eur,
                     instrument_by_id=instrument_by_id,
                 )
+                month_order_details.extend(executed_monthly_orders)
                 cash = cash_box[0]
+
+        month_events.append(
+            {
+                "type": "rebalance",
+                "reason": rebalance_frequency,
+                "band_pct": _round_float(float(band_pct), 8),
+                "scheduled": bool(rebalance_due),
+                "triggered": bool(rebalance_triggered),
+                "underweights": rebalance_underweights,
+            }
+        )
+        month_order_details = sorted(
+            month_order_details,
+            key=lambda row: (str(row.get("ticker") or ""), str(row.get("instrument_id") or "")),
+        )
+        month_events.append(
+            {
+                "type": "orders",
+                "count": len(month_order_details),
+                "total_spent": _round_float(
+                    sum(float(row.get("amount_eur") or 0.0) for row in month_order_details),
+                    8,
+                ),
+                "orders": month_order_details,
+            }
+        )
 
         snapshot = _build_snapshot(
             month=month,
             holdings_by_id=holdings_by_id,
             instrument_by_id=instrument_by_id,
-            month_prices=month_prices,
+            month_prices_local=month_prices_local,
+            month_prices_eur=month_prices_eur,
+            month_fx_rates=month_fx_rates,
             cash=cash,
             contribution_to_date=contribution_to_date,
+            events=month_events,
         )
         snapshots.append(snapshot)
 
@@ -147,24 +242,42 @@ def run_simulation(
         monthly_contribution=float(monthly),
     )
     payload = {
-        "start": start,
-        "end": end,
+        "start": effective_start,
+        "end": requested_end,
+        "requested_start": requested_start,
+        "requested_end": requested_end,
+        "effective_start": effective_start,
+        "effective_end": requested_end,
         "monthly_contribution_eur": float(monthly),
         "initial_cash_eur": float(initial),
         "provider": SUPPORTED_PROVIDER,
         "policy_hash": str(policy_doc.get("policy_hash") or ""),
+        "history_window": {
+            "requested_start": requested_start,
+            "requested_end": requested_end,
+            "effective_start": effective_start,
+            "effective_end": requested_end,
+            "adjusted": adjusted_window,
+            "first_available_by_ticker": first_available_by_ticker,
+        },
         "rebalance": {
             "frequency": rebalance_frequency,
             "band_pct": float(band_pct),
             "buy_only": True,
+        },
+        "fx": {
+            "base_currency": "EUR",
+            "conversions": fx_context["conversions"],
+            "unresolved_currencies": fx_context["unresolved_currencies"],
+            "currency_sources": fx_context["currency_sources"],
         },
         "warnings": warnings,
         "stats": stats,
         "snapshots": snapshots,
     }
 
-    sim_path = Path(sim_dir) / f"portfolio_{start}_{end}.json"
-    report_path = Path(reports_dir) / f"sim_{start}_{end}.md"
+    sim_path = Path(sim_dir) / f"portfolio_{effective_start}_{requested_end}.json"
+    report_path = Path(reports_dir) / f"sim_{effective_start}_{requested_end}.md"
     sim_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     sim_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -198,6 +311,236 @@ def _provider_instruments(instruments: list[PolicyInstrument], provider: str) ->
             f"Found non-{provider_key} instruments: {sample}."
         )
     return sorted(instruments, key=lambda row: row.instrument_id)
+
+
+def resolve_fx_ticker(
+    currency: str,
+    ticker_exists: Callable[[str], bool] | None = None,
+) -> tuple[str, bool]:
+    normalized = str(currency or "").strip().upper()
+    if normalized == "EUR":
+        return "EUR", False
+    if len(normalized) != 3:
+        raise ValueError(f"Invalid currency code '{currency}'.")
+
+    direct = f"{normalized}EUR=X"
+    inverse = f"EUR{normalized}=X"
+    if ticker_exists is None:
+        return direct, False
+    if ticker_exists(direct):
+        return direct, False
+    if ticker_exists(inverse):
+        return inverse, True
+    raise ValueError(
+        f"Unable to resolve Yahoo FX ticker for currency '{normalized}'. "
+        f"Tried '{direct}' and '{inverse}'."
+    )
+
+
+def _month_end_date(month_start: date) -> date:
+    if month_start.month == 12:
+        next_month = month_start.replace(year=month_start.year + 1, month=1, day=1)
+    else:
+        next_month = month_start.replace(month=month_start.month + 1, day=1)
+    return next_month - timedelta(days=1)
+
+
+def _detect_ticker_currencies(
+    instruments: list[PolicyInstrument],
+    warnings: list[str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    policy_currency_by_ticker: dict[str, str] = {}
+    for instrument in sorted(instruments, key=lambda row: (row.ticker, row.instrument_id)):
+        policy_currency = str(instrument.currency or "").strip().upper()
+        if not policy_currency:
+            continue
+        existing = policy_currency_by_ticker.get(instrument.ticker)
+        if existing is not None and existing != policy_currency:
+            raise ValueError(
+                f"Ticker '{instrument.ticker}' has conflicting policy currency overrides: {existing} vs {policy_currency}."
+            )
+        policy_currency_by_ticker[instrument.ticker] = policy_currency
+
+    by_ticker: dict[str, str] = {}
+    source_by_ticker: dict[str, str] = {}
+    for ticker in sorted({row.ticker for row in instruments}):
+        policy_currency = policy_currency_by_ticker.get(ticker)
+        if policy_currency:
+            by_ticker[ticker] = policy_currency
+            source_by_ticker[ticker] = "policy"
+            continue
+
+        currency = get_yahoo_ticker_currency(ticker)
+        if currency is None:
+            warnings.append(
+                f"Ticker '{ticker}': unable to detect quote currency from policy or Yahoo metadata; assuming EUR."
+            )
+            by_ticker[ticker] = "EUR"
+            source_by_ticker[ticker] = "fallback"
+            continue
+
+        by_ticker[ticker] = str(currency).upper()
+        source_by_ticker[ticker] = "metadata"
+    return by_ticker, source_by_ticker
+
+
+def _summarize_currency_sources(
+    currency_by_ticker: dict[str, str],
+    currency_source_by_ticker: dict[str, str],
+) -> dict[str, str]:
+    by_currency: dict[str, set[str]] = {}
+    for ticker in sorted(currency_by_ticker):
+        currency = str(currency_by_ticker[ticker]).upper()
+        source = str(currency_source_by_ticker.get(ticker) or "metadata")
+        by_currency.setdefault(currency, set()).add(source)
+
+    summarized: dict[str, str] = {}
+    for currency in sorted(by_currency):
+        source_set = by_currency[currency]
+        if source_set == {"policy"}:
+            summarized[currency] = "policy"
+        elif source_set == {"metadata"}:
+            summarized[currency] = "metadata"
+        elif source_set == {"fallback"}:
+            summarized[currency] = "fallback"
+        elif "policy" in source_set:
+            summarized[currency] = "mixed"
+        elif "metadata" in source_set:
+            summarized[currency] = "metadata"
+        else:
+            summarized[currency] = "fallback"
+    return summarized
+
+
+def _build_fx_context(
+    start: str,
+    end: str,
+    start_date: date,
+    end_date: date,
+    currencies: list[str],
+    currency_source_by_currency: dict[str, str],
+    prices_dir: Path,
+    warnings: list[str],
+) -> dict[str, Any]:
+    months = month_strings_inclusive(start, end)
+    rates_by_currency: dict[str, dict[str, float]] = {"EUR": {month: 1.0 for month in months}}
+    conversions: list[dict[str, Any]] = []
+    unresolved_currencies: list[str] = []
+
+    fx_cache_dir = prices_dir / FX_CACHE_DIRNAME
+    for currency in sorted(set(currencies)):
+        if currency == "EUR":
+            continue
+        resolved = _load_fx_rates_for_currency(
+            currency=currency,
+            start=start,
+            end=end,
+            start_date=start_date,
+            end_date=end_date,
+            fx_cache_dir=fx_cache_dir,
+        )
+        rates_by_currency[currency] = resolved["rates"]
+        if resolved["resolved"]:
+            conversions.append(
+                {
+                    "currency": currency,
+                    "fx_ticker": resolved["fx_ticker"],
+                    "invert": resolved["invert"],
+                }
+            )
+        else:
+            unresolved_currencies.append(currency)
+            warnings.append(
+                f"Currency '{currency}': unable to resolve Yahoo FX pair; using local prices as EUR (no conversion)."
+            )
+
+    return {
+        "rates_by_currency": rates_by_currency,
+        "conversions": conversions,
+        "unresolved_currencies": sorted(unresolved_currencies),
+        "currency_sources": dict(sorted(currency_source_by_currency.items())),
+    }
+
+
+def _load_fx_rates_for_currency(
+    currency: str,
+    start: str,
+    end: str,
+    start_date: date,
+    end_date: date,
+    fx_cache_dir: Path,
+) -> dict[str, Any]:
+    months = month_strings_inclusive(start, end)
+
+    base_ticker, _ = resolve_fx_ticker(currency)
+    inverse_ticker = f"EUR{currency}=X"
+    candidates = [(base_ticker, False), (inverse_ticker, True)]
+
+    for fx_ticker, invert in candidates:
+        if fx_ticker == "EUR":
+            continue
+        try:
+            cache_path = fx_cache_dir / f"{fx_ticker}.csv"
+            daily_series = read_price_cache(cache_path)
+            try:
+                month_end = month_end_prices(daily_series, start, end)
+            except ValueError:
+                synced = sync_yahoo_price_cache(
+                    cache_path=cache_path,
+                    ticker=fx_ticker,
+                    start=start_date,
+                    end=end_date,
+                    max_retries=3,
+                )
+                month_end = month_end_prices(synced["series"], start, end)
+            rates: dict[str, float] = {}
+            for month in months:
+                value = float(month_end[month])
+                if value <= 0:
+                    raise ValueError(f"Invalid FX rate for {fx_ticker} in month {month}.")
+                rates[month] = (1.0 / value) if invert else value
+            return {
+                "resolved": True,
+                "fx_ticker": fx_ticker,
+                "invert": invert,
+                "rates": rates,
+            }
+        except Exception:
+            continue
+
+    return {
+        "resolved": False,
+        "fx_ticker": None,
+        "invert": False,
+        "rates": {month: 1.0 for month in months},
+    }
+
+
+def _month_fx_rates(
+    month: str,
+    month_prices_local: dict[str, float],
+    currency_by_ticker: dict[str, str],
+    fx_context: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, float]:
+    rates_by_currency = fx_context["rates_by_currency"]
+    month_rates: dict[str, float] = {}
+    for ticker in sorted(month_prices_local):
+        currency = currency_by_ticker.get(ticker, "EUR")
+        month_series = rates_by_currency.get(currency)
+        if not isinstance(month_series, dict):
+            warnings.append(f"{month}: missing FX context for currency '{currency}', using 1.0.")
+            month_rates[currency] = 1.0
+            continue
+        rate = month_series.get(month)
+        if rate is None:
+            warnings.append(f"{month}: missing FX rate for currency '{currency}', using 1.0.")
+            month_rates[currency] = 1.0
+            continue
+        month_rates[currency] = float(rate)
+    if "EUR" not in month_rates:
+        month_rates["EUR"] = 1.0
+    return month_rates
 
 
 def _effective_target_weights(
@@ -247,7 +590,8 @@ def _load_month_end_prices(
     end: str,
     instruments: list[PolicyInstrument],
     prices_dir: Path,
-) -> dict[str, dict[str, float]]:
+    allow_short_history: bool = False,
+) -> dict[str, Any]:
     unique_tickers = sorted({row.ticker for row in instruments})
     missing_files = [ticker for ticker in unique_tickers if not (prices_dir / f"{ticker}.csv").exists()]
     if missing_files:
@@ -257,17 +601,55 @@ def _load_month_end_prices(
             + ". Run fetch-prices first."
         )
 
-    by_ticker: dict[str, dict[str, float]] = {}
+    first_available_by_ticker: dict[str, dict[str, str]] = {}
+    daily_by_ticker: dict[str, dict[date, float]] = {}
+    first_month_candidates: list[str] = []
     for ticker in unique_tickers:
         daily = read_price_cache(prices_dir / f"{ticker}.csv")
+        if not daily:
+            raise ValueError(
+                f"Ticker '{ticker}' has an empty local price cache. Run fetch-prices first."
+            )
+        first_dt = min(daily)
+        first_month = first_dt.strftime("%Y-%m")
+        first_available_by_ticker[ticker] = {
+            "first_date": first_dt.isoformat(),
+            "first_month": first_month,
+        }
+        daily_by_ticker[ticker] = daily
+        first_month_candidates.append(first_month)
+
+    effective_start = start
+    if allow_short_history and first_month_candidates:
+        latest_first_month = max(first_month_candidates)
+        if latest_first_month > effective_start:
+            effective_start = latest_first_month
+
+    if effective_start > end:
+        raise ValueError(
+            f"Effective start {effective_start} is after end {end}; insufficient overlapping history across tickers."
+        )
+
+    by_ticker: dict[str, dict[str, float]] = {}
+    for ticker in unique_tickers:
+        daily = daily_by_ticker[ticker]
         try:
-            by_ticker[ticker] = month_end_prices(daily, start, end)
+            by_ticker[ticker] = month_end_prices(daily, effective_start, end)
         except ValueError as exc:
+            if allow_short_history:
+                raise ValueError(
+                    f"Ticker '{ticker}' is missing required month-end prices between effective_start={effective_start} and {end}. "
+                    "This is beyond initial start-history truncation; refresh caches or narrow range."
+                ) from exc
             raise ValueError(
                 f"Ticker '{ticker}' is missing required month-end prices between {start} and {end}. "
                 "Run fetch-prices for a wider range."
             ) from exc
-    return by_ticker
+    return {
+        "prices": by_ticker,
+        "effective_start": effective_start,
+        "first_available_by_ticker": first_available_by_ticker,
+    }
 
 
 def _read_rebalance_settings(policy_doc: dict[str, Any], policy: dict[str, Any]) -> tuple[str, float]:
@@ -440,14 +822,32 @@ def _normalize_weights(weights: dict[str, float]) -> dict[str, float]:
     return out
 
 
+def _format_underweights_for_event(
+    rebalance_weights: dict[str, float],
+    instrument_by_id: dict[str, PolicyInstrument],
+) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for instrument_id in sorted(rebalance_weights):
+        ticker = instrument_by_id[instrument_id].ticker
+        payload.append(
+            {
+                "ticker": ticker,
+                "instrument_id": instrument_id,
+                "deficit_eur": _round_float(float(rebalance_weights[instrument_id]), 8),
+            }
+        )
+    return payload
+
+
 def _execute_orders(
     holdings_by_id: dict[str, float],
     cash_ref: list[float],
     orders: list[dict[str, Any]],
     month_prices: dict[str, float],
     instrument_by_id: dict[str, PolicyInstrument],
-) -> None:
+) -> list[dict[str, Any]]:
     cash = float(cash_ref[0])
+    executed: list[dict[str, Any]] = []
     for order in orders:
         if str(order.get("side")) != "BUY":
             continue
@@ -464,21 +864,35 @@ def _execute_orders(
             continue
         if amount_eur - cash > 1e-9:
             raise RuntimeError(f"Insufficient cash for order on {instrument_id}: need {amount_eur}, have {cash}.")
-        holdings_by_id[instrument_id] += amount_eur / price
+        shares = amount_eur / price
+        holdings_by_id[instrument_id] += shares
         cash -= amount_eur
+        executed.append(
+            {
+                "ticker": ticker,
+                "instrument_id": instrument_id,
+                "shares": _round_float(shares, 10),
+                "price_eur": _round_float(price, 8),
+                "amount_eur": _round_float(amount_eur, 8),
+            }
+        )
 
     if abs(cash) < 1e-12:
         cash = 0.0
     cash_ref[0] = cash
+    return executed
 
 
 def _build_snapshot(
     month: str,
     holdings_by_id: dict[str, float],
     instrument_by_id: dict[str, PolicyInstrument],
-    month_prices: dict[str, float],
+    month_prices_local: dict[str, float],
+    month_prices_eur: dict[str, float],
+    month_fx_rates: dict[str, float],
     cash: float,
     contribution_to_date: float,
+    events: list[dict[str, Any]],
 ) -> dict[str, Any]:
     holdings_by_ticker: dict[str, float] = {}
     value_by_ticker: dict[str, float] = {}
@@ -486,7 +900,7 @@ def _build_snapshot(
         ticker = instrument_by_id[instrument_id].ticker
         shares = float(holdings_by_id[instrument_id])
         holdings_by_ticker[ticker] = holdings_by_ticker.get(ticker, 0.0) + shares
-        value_by_ticker[ticker] = value_by_ticker.get(ticker, 0.0) + shares * float(month_prices[ticker])
+        value_by_ticker[ticker] = value_by_ticker.get(ticker, 0.0) + shares * float(month_prices_eur[ticker])
 
     total_value = float(cash) + sum(value_by_ticker.values())
     weights = {}
@@ -500,10 +914,14 @@ def _build_snapshot(
         "date": month,
         "cash": _round_float(cash, 8),
         "holdings": {ticker: _round_float(holdings_by_ticker[ticker], 10) for ticker in sorted(holdings_by_ticker)},
-        "prices": {ticker: _round_float(month_prices[ticker], 8) for ticker in sorted(month_prices)},
+        "prices": {ticker: _round_float(month_prices_eur[ticker], 8) for ticker in sorted(month_prices_eur)},
+        "prices_local": {ticker: _round_float(month_prices_local[ticker], 8) for ticker in sorted(month_prices_local)},
+        "prices_eur": {ticker: _round_float(month_prices_eur[ticker], 8) for ticker in sorted(month_prices_eur)},
+        "fx_rates": {currency: _round_float(month_fx_rates[currency], 8) for currency in sorted(month_fx_rates)},
         "total_value": _round_float(total_value, 8),
         "weights": {ticker: _round_float(weights[ticker], 10) for ticker in sorted(weights)},
         "contribution_to_date": _round_float(contribution_to_date, 8),
+        "events": events,
     }
 
 
@@ -560,6 +978,7 @@ def _render_report(payload: dict[str, Any]) -> str:
     end = payload["end"]
     stats = payload.get("stats") or {}
     snapshots = payload.get("snapshots") or []
+    history_window = payload.get("history_window") or {}
 
     lines: list[str] = []
     lines.append(f"# Simulation {start} to {end}")
@@ -568,12 +987,63 @@ def _render_report(payload: dict[str, Any]) -> str:
     lines.append(f"- Initial cash (EUR): {payload.get('initial_cash_eur')}")
     lines.append(f"- Provider: {payload.get('provider')}")
     lines.append("")
+
+    requested_start = str(history_window.get("requested_start") or payload.get("requested_start") or start)
+    requested_end = str(history_window.get("requested_end") or payload.get("requested_end") or end)
+    effective_start = str(history_window.get("effective_start") or payload.get("effective_start") or start)
+    effective_end = str(history_window.get("effective_end") or payload.get("effective_end") or end)
+    adjusted = bool(history_window.get("adjusted"))
+    first_available_by_ticker = history_window.get("first_available_by_ticker") or {}
+
+    lines.append("## History Window")
+    lines.append("")
+    lines.append(f"- Requested window: {requested_start} to {requested_end}")
+    lines.append(f"- Effective window: {effective_start} to {effective_end}")
+    if adjusted:
+        lines.append(
+            "- Output filenames use effective_start to prevent misleading artifacts when short history is allowed."
+        )
+    if isinstance(first_available_by_ticker, dict) and first_available_by_ticker:
+        lines.append("")
+        lines.append("| ticker | first_available_date | first_available_month |")
+        lines.append("|---|---|---|")
+        for ticker in sorted(first_available_by_ticker):
+            row = first_available_by_ticker.get(ticker) or {}
+            lines.append(
+                f"| {ticker} | {row.get('first_date', '')} | {row.get('first_month', '')} |"
+            )
+    lines.append("")
+
     lines.append("## Key Stats")
     lines.append("")
     lines.append(f"- CAGR (TWR, cashflow-adjusted): {_fmt_pct(stats.get('cagr'))}")
     lines.append(f"- Annualized volatility (TWR): {_fmt_pct(stats.get('annualized_volatility'))}")
     lines.append(f"- Max drawdown (TWR): {_fmt_pct(stats.get('max_drawdown'))}")
     lines.append("- Metrics are time-weighted and remove the effect of monthly contributions.")
+    lines.append("")
+
+    fx = payload.get("fx") or {}
+    conversions = fx.get("conversions") or []
+    currency_sources = fx.get("currency_sources") or {}
+    unresolved = fx.get("unresolved_currencies") or []
+    lines.append("## FX Conversion")
+    lines.append("")
+    lines.append(f"- Base currency: {fx.get('base_currency', 'EUR')}")
+    if conversions:
+        lines.append("")
+        lines.append("| currency | fx_ticker | invert | source |")
+        lines.append("|---|---|---:|---|")
+        for row in conversions:
+            currency = str(row["currency"])
+            source = str(currency_sources.get(currency) or row.get("currency_source") or "metadata")
+            lines.append(
+                f"| {currency} | {row['fx_ticker']} | {str(bool(row.get('invert'))).lower()} | {source} |"
+            )
+    else:
+        lines.append("- No non-EUR conversions were required.")
+    if unresolved:
+        lines.append("")
+        lines.append("- Unresolved currencies (fallback to local pricing): " + ", ".join(sorted(unresolved)))
     lines.append("")
 
     warnings = payload.get("warnings") or []
@@ -583,6 +1053,37 @@ def _render_report(payload: dict[str, Any]) -> str:
         for warning in warnings:
             lines.append(f"- {warning}")
         lines.append("")
+
+    lines.append("## Events")
+    lines.append("")
+    for row in snapshots:
+        month = str(row.get("date") or "")
+        events = row.get("events") or []
+        contribution = _find_event(events, "contribution")
+        rebalance = _find_event(events, "rebalance")
+        orders = _find_event(events, "orders")
+
+        contribution_amount = float((contribution or {}).get("amount") or 0.0)
+        lines.append(f"- {month}: contribution +{contribution_amount:.2f} EUR")
+
+        rebalance_triggered = bool((rebalance or {}).get("triggered"))
+        reason = str((rebalance or {}).get("reason") or "")
+        lines.append(f"- {month}: rebalance triggered={'yes' if rebalance_triggered else 'no'} ({reason})")
+
+        order_rows = list((orders or {}).get("orders") or [])
+        top_buys = sorted(
+            order_rows,
+            key=lambda item: (-float(item.get("amount_eur") or 0.0), str(item.get("ticker") or "")),
+        )[:3]
+        if top_buys:
+            rendered = ", ".join(
+                f"{str(item.get('ticker') or '')} {float(item.get('amount_eur') or 0.0):.2f} EUR"
+                for item in top_buys
+            )
+            lines.append(f"- {month}: top buys {rendered}")
+        else:
+            lines.append(f"- {month}: top buys none")
+    lines.append("")
 
     lines.append("## Monthly Portfolio Value")
     lines.append("")
@@ -605,31 +1106,8 @@ def _round_float(value: float, digits: int) -> float:
     return round(float(value), digits)
 
 
-def _non_eur_tickers(tickers: set[str]) -> list[str]:
-    non_eur_suffixes = {
-        ".L",
-        ".SW",
-        ".OL",
-        ".CO",
-        ".ST",
-        ".TO",
-        ".AX",
-        ".HK",
-        ".T",
-        ".KS",
-        ".KQ",
-        ".NS",
-        ".BO",
-        ".SA",
-        ".MX",
-        ".TA",
-    }
-    flagged = []
-    for ticker in sorted(tickers):
-        upper = ticker.upper()
-        if "." not in upper:
-            continue
-        suffix = "." + upper.split(".")[-1]
-        if suffix in non_eur_suffixes:
-            flagged.append(ticker)
-    return flagged
+def _find_event(events: list[dict[str, Any]], event_type: str) -> dict[str, Any] | None:
+    for event in events:
+        if str(event.get("type") or "") == event_type:
+            return event
+    return None

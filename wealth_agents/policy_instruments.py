@@ -18,6 +18,7 @@ class PolicyInstrument:
     weight_within_bucket: float
     provider: str
     ticker: str
+    currency: str | None = None
 
 
 def load_policy_and_instruments(
@@ -84,9 +85,18 @@ def _read_policy_instruments(policy: dict[str, Any], policy_path: str) -> list[P
             data = item.get("data")
             provider = ""
             ticker = ""
+            currency: str | None = None
             if isinstance(data, dict):
                 provider = str(data.get("provider") or "").strip()
                 ticker = str(data.get("ticker") or "").strip()
+                raw_currency = str(data.get("currency") or "").strip().upper()
+                if raw_currency:
+                    if len(raw_currency) != 3 or not raw_currency.isalpha():
+                        raise ValueError(
+                            f"Instrument '{instrument_id}' in bucket '{bucket_name}' has invalid data.currency. "
+                            "Expected a 3-letter currency code such as EUR, USD, GBP, or CHF."
+                        )
+                    currency = raw_currency
 
             missing_fields: list[str] = []
             if not provider:
@@ -112,6 +122,7 @@ def _read_policy_instruments(policy: dict[str, Any], policy_path: str) -> list[P
                     weight_within_bucket=weight,
                     provider=provider.lower(),
                     ticker=ticker,
+                    currency=currency,
                 )
             )
 
