@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from .feed_health import format_health_table, load_feed_health
+from .fetch_prices import fetch_prices_for_policy
 from .ingest import ingest_manual_inputs
 from .ips import (
     draft_policy,
@@ -14,6 +15,7 @@ from .orders import propose_monthly_orders
 from .policy_review import apply_review_proposal, review_policy
 from .report import generate_weekly_report
 from .rss import collect_from_feeds_with_stats
+from .simulation import run_simulation
 from .storage import append_unique_records, validate_jsonl
 
 
@@ -71,6 +73,43 @@ def build_parser() -> argparse.ArgumentParser:
     propose_orders.add_argument("--policy", default="data/policy/policy.yml")
     propose_orders.add_argument("--orders-dir", default="orders")
     propose_orders.add_argument("--reports-dir", default="reports")
+
+    fetch_prices = sub.add_parser(
+        "fetch-prices",
+        help="Fetch and cache adjusted-close prices from market data providers",
+        description="Fetch and cache daily adjusted-close prices for policy instruments.",
+        epilog=(
+            "Examples:\n"
+            "  python -m wealth_agents fetch-prices --start 2024-02-01 --end 2026-02-09\n"
+            "  python -m wealth_agents fetch-prices --start 2025-01-01 --end 2025-12-31 --provider yahoo"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    fetch_prices.add_argument("--start", required=True, help="Start date (inclusive), format YYYY-MM-DD")
+    fetch_prices.add_argument("--end", required=True, help="End date (inclusive), format YYYY-MM-DD")
+    fetch_prices.add_argument("--provider", default="yahoo", help="Price provider name (default: yahoo)")
+    fetch_prices.add_argument("--policy", default="data/policy/policy.yml", help="Policy YAML path")
+    fetch_prices.add_argument("--prices-dir", default="data/prices", help="Local cache root directory")
+
+    simulate = sub.add_parser(
+        "simulate",
+        help="Run monthly contribution simulation/backtest from cached prices",
+        description="Run monthly portfolio simulation using cached month-end adjusted-close prices.",
+        epilog=(
+            "Examples:\n"
+            "  python -m wealth_agents simulate --start 2024-02 --end 2026-02 --monthly 2500\n"
+            "  python -m wealth_agents simulate --start 2025-01 --end 2025-12 --monthly 1500 --initial 5000"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    simulate.add_argument("--start", required=True, help="Start month (inclusive), format YYYY-MM")
+    simulate.add_argument("--end", required=True, help="End month (inclusive), format YYYY-MM")
+    simulate.add_argument("--monthly", required=True, type=float, help="Monthly contribution in EUR")
+    simulate.add_argument("--initial", type=float, default=0.0, help="Initial cash in EUR (default: 0)")
+    simulate.add_argument("--policy", default="data/policy/policy.yml", help="Policy YAML path")
+    simulate.add_argument("--prices-dir", default="data/prices", help="Local price cache root directory")
+    simulate.add_argument("--sim-dir", default="sim", help="Simulation JSON output directory")
+    simulate.add_argument("--reports-dir", default="reports", help="Simulation report output directory")
 
     policy_review = sub.add_parser("policy-review", help="Generate quarterly-cadence policy adjustment proposal")
     policy_review.add_argument("--week", required=True, help="ISO week format YYYY-Www, e.g., 2026-W06")
@@ -178,6 +217,49 @@ def main() -> int:
             logging.getLogger(__name__).info(
                 "Order proposal complete: orders=%s report=%s",
                 orders_path,
+                report_path,
+            )
+            return 0
+
+        if args.command == "fetch-prices":
+            summary = fetch_prices_for_policy(
+                start=args.start,
+                end=args.end,
+                provider=args.provider,
+                policy_path=args.policy,
+                prices_dir=args.prices_dir,
+            )
+            logging.getLogger(__name__).info(
+                "Price fetch complete: provider=%s tickers=%s downloaded_rows=%s",
+                summary["provider"],
+                summary["tickers_count"],
+                summary["downloaded_rows"],
+            )
+            for row in summary["tickers"]:
+                logging.getLogger(__name__).info(
+                    "Price cache: ticker=%s rows_total=%s rows_appended=%s downloaded_rows=%s",
+                    row["ticker"],
+                    row["rows_total"],
+                    row["rows_appended"],
+                    row["downloaded_rows"],
+                )
+            return 0
+
+        if args.command == "simulate":
+            sim_path, report_path, payload = run_simulation(
+                start=args.start,
+                end=args.end,
+                monthly=args.monthly,
+                initial=args.initial,
+                policy_path=args.policy,
+                prices_dir=args.prices_dir,
+                sim_dir=args.sim_dir,
+                reports_dir=args.reports_dir,
+            )
+            logging.getLogger(__name__).info(
+                "Simulation complete: snapshots=%s sim=%s report=%s",
+                len(payload.get("snapshots", [])),
+                sim_path,
                 report_path,
             )
             return 0
