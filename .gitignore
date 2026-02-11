@@ -35,3 +35,6 @@ log
 
 # Portfolio live state (local only)
 data/portfolio/live.json
+
+# Portfolio local backups
+data/portfolio/*.local.json

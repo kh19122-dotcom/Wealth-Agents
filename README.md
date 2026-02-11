@@ -63,6 +63,8 @@ The live portfolio state file is local-only (gitignored). Create it from the exa
 ```bash
 cp data/portfolio/live.example.json data/portfolio/live.json
 
+(Docs: add portfolio first-time setup and ignore local portfolio backups)
+
 ```md
 Then import trades and generate a drift report:
 
@@ -71,6 +73,10 @@ uv run python -m wealth_agents portfolio import-trades --csv <path/to/trades.csv
 uv run python -m wealth_agents portfolio report --asof YYYY-MM-DD
 
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> ee78141 (Docs: add portfolio first-time setup and ignore local portfolio backups)
 ## Usage
 
 Collect latest feed items:
