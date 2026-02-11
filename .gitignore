@@ -32,3 +32,6 @@ sim/
 log/
 log
 
+
+# Portfolio live state (local only)
+data/portfolio/live.json

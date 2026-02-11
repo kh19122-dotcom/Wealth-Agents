@@ -1,7 +1,7 @@
 {
   "base_currency": "EUR",
   "asof": "2026-02-10",
-  "cash_eur": -1401.0,
+  "cash_eur": 0.0,
   "holdings": {
     "4GLD.DE": {
       "shares": 0.0
@@ -10,12 +10,12 @@
       "shares": 0.0
     },
     "XEON.DE": {
-      "shares": 10.0
+      "shares": 0.0
     },
     "XUSE.AS": {
       "shares": 0.0
     }
   },
-  "trade_count": 1,
+  "trade_count": 0,
   "notes": ""
 }
