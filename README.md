@@ -56,6 +56,21 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
 uv sync --extra dev
 ```
 
+### Portfolio (first-time setup)
+
+The live portfolio state file is local-only (gitignored). Create it from the example:
+
+```bash
+cp data/portfolio/live.example.json data/portfolio/live.json
+
+```md
+Then import trades and generate a drift report:
+
+```bash
+uv run python -m wealth_agents portfolio import-trades --csv <path/to/trades.csv>
+uv run python -m wealth_agents portfolio report --asof YYYY-MM-DD
+
+
 ## Usage
 
 Collect latest feed items:
