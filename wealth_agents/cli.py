@@ -65,6 +65,27 @@ def build_parser() -> argparse.ArgumentParser:
     ips_draft.add_argument("--input", default="data/policy/ips_inputs.yml")
     ips_draft.add_argument("--draft-output", default="data/policy/policy_draft.yml")
     ips_draft.add_argument("--report-dir", default="reports")
+    ips_draft.add_argument(
+        "--weekly-aggregates",
+        default="data/meta/weekly_aggregates.jsonl",
+        help="Optional weekly aggregate store for signal-aware tilts (default: data/meta/weekly_aggregates.jsonl)",
+    )
+    ips_draft.add_argument(
+        "--week",
+        default=None,
+        help="Optional ISO week (YYYY-Www) to anchor signal overlay; defaults to latest aggregate week.",
+    )
+    ips_draft.add_argument(
+        "--max-signal-tilt",
+        type=int,
+        default=5,
+        help="Maximum allocation tilt in percentage points from signal overlay (default: 5).",
+    )
+    ips_draft.add_argument(
+        "--simulation-feedback",
+        default=None,
+        help="Optional simulation JSON payload path to calibrate signal tilt guardrails.",
+    )
 
     ips_finalize = ips_sub.add_parser("finalize", help="Finalize one draft candidate")
     ips_finalize.add_argument("--choice", required=True, help="One of: conservative, balanced, aggressive")
@@ -234,6 +255,10 @@ def main() -> int:
                     input_path=args.input,
                     draft_path=args.draft_output,
                     report_dir=args.report_dir,
+                    weekly_aggregates_path=args.weekly_aggregates,
+                    week=args.week,
+                    max_signal_tilt_pct=args.max_signal_tilt,
+                    simulation_feedback_path=args.simulation_feedback,
                 )
                 logging.getLogger(__name__).info("IPS draft complete: draft=%s report=%s", draft_path, report_path)
                 return 0
