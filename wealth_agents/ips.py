@@ -26,6 +26,54 @@ DEFAULT_REPORT_DIR = "reports"
 DEFAULT_WEEKLY_AGGREGATES_PATH = "data/meta/weekly_aggregates.jsonl"
 DEFAULT_SIGNAL_MAX_TILT_PCT = 5
 ISO_WEEK_PATTERN = re.compile(r"^\d{4}-W\d{2}$")
+DEFAULT_POLICY_INSTRUMENTS: dict[str, list[dict[str, Any]]] = {
+    "global_equity": [
+        {
+            "id": "sp500_acc",
+            "isin": "IE00B5BMR087",
+            "name": "iShares Core S&P 500 UCITS ETF (Acc)",
+            "weight_within_bucket": 0.70,
+            "data": {
+                "provider": "yahoo",
+                "ticker": "CSPX.L",
+            },
+        },
+        {
+            "id": "ex_us_equity",
+            "isin": "IE000R4ZNTN3",
+            "name": "iShares MSCI World ex-USA UCITS ETF USD (Acc)",
+            "weight_within_bucket": 0.30,
+            "data": {
+                "provider": "yahoo",
+                "ticker": "XUSE.AS",
+            },
+        },
+    ],
+    "bonds_cashlike": [
+        {
+            "id": "xeon",
+            "isin": "LU0290358497",
+            "name": "Xtrackers II EUR Overnight Rate Swap UCITS ETF (XEON)",
+            "weight_within_bucket": 1.0,
+            "data": {
+                "provider": "yahoo",
+                "ticker": "XEON.DE",
+            },
+        }
+    ],
+    "optional_gold": [
+        {
+            "id": "xetra_gold",
+            "isin": "DE000A0S9GB0",
+            "name": "Xetra-Gold",
+            "weight_within_bucket": 1.0,
+            "data": {
+                "provider": "yahoo",
+                "ticker": "4GLD.DE",
+            },
+        }
+    ],
+}
 
 
 def init_ips_files(
@@ -181,7 +229,22 @@ def finalize_policy(
     }
     # Attach into the finalized policy document
     selected.setdefault("thesis_sleeve", thesis)
+    instruments, instrument_source = _resolve_finalize_instruments(
+        selected_policy=selected,
+        policy_path=policy_path,
+    )
+    selected["instruments"] = instruments
 
+    notes = selected.setdefault("notes", {})
+    if not isinstance(notes, dict):
+        selected["notes"] = {"rationale": str(notes)}
+        notes = selected["notes"]
+    notes["instrument_source"] = instrument_source
+    if instrument_source == "default_template":
+        notes["instrument_setup"] = (
+            "Default instrument universe was auto-attached to keep Phase 2->3 automation runnable. "
+            "Review instruments before execution."
+        )
 
     hash_basis = {
         "selected_candidate": choice,
@@ -271,6 +334,54 @@ def _default_inputs() -> dict[str, Any]:
             "band_pct": 5,
         },
     }
+
+
+def _resolve_finalize_instruments(
+    selected_policy: dict[str, Any],
+    policy_path: str,
+) -> tuple[dict[str, list[dict[str, Any]]], str]:
+    candidate_instruments = selected_policy.get("instruments")
+    if _is_instruments_mapping(candidate_instruments):
+        return to_jsonable_copy(candidate_instruments), "draft_candidate"
+
+    existing = _load_existing_policy_instruments(policy_path)
+    if existing is not None:
+        return existing, "existing_policy"
+
+    return to_jsonable_copy(DEFAULT_POLICY_INSTRUMENTS), "default_template"
+
+
+def _load_existing_policy_instruments(policy_path: str) -> Optional[dict[str, list[dict[str, Any]]]]:
+    path = Path(policy_path)
+    if not path.exists():
+        return None
+    try:
+        doc = read_yaml(str(path))
+    except Exception:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    policy = doc.get("policy")
+    if not isinstance(policy, dict):
+        return None
+    instruments = policy.get("instruments")
+    if not _is_instruments_mapping(instruments):
+        return None
+    return to_jsonable_copy(instruments)
+
+
+def _is_instruments_mapping(value: Any) -> bool:
+    if not isinstance(value, dict) or not value:
+        return False
+    for bucket, rows in value.items():
+        if not isinstance(bucket, str) or not bucket.strip():
+            return False
+        if not isinstance(rows, list) or not rows:
+            return False
+        for row in rows:
+            if not isinstance(row, dict):
+                return False
+    return True
 
 
 def _merge_defaults(user_values: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
