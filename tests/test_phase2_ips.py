@@ -39,6 +39,31 @@ def _write_inputs(path: Path, overrides: dict | None = None) -> None:
     path.write_text(yaml.safe_dump(base, sort_keys=False), encoding="utf-8")
 
 
+def _write_weekly_aggregates(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _write_simulation_payload(path: Path, stats: dict) -> None:
+    payload = {
+        "start": "2024-01",
+        "end": "2025-12",
+        "stats": stats,
+        "snapshots": [],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _bucket_pct(candidate: dict, bucket: str) -> int:
+    for row in candidate.get("target_allocation") or []:
+        if str(row.get("bucket") or "").strip() == bucket:
+            return int(row.get("pct"))
+    return 0
+
+
 def test_ips_init_creates_expected_files_with_valid_yaml(tmp_path: Path):
     input_path = tmp_path / "data/policy/ips_inputs.yml"
     questions_path = tmp_path / "reports/ips_questions.md"
@@ -173,3 +198,178 @@ def test_invalid_risk_tolerance_fails_with_helpful_error(tmp_path: Path):
             draft_path=str(tmp_path / "data/policy/policy_draft.yml"),
             report_dir=str(tmp_path / "reports"),
         )
+
+
+def test_ips_draft_applies_risk_off_signal_overlay_with_persistence(tmp_path: Path):
+    input_path = tmp_path / "data/policy/ips_inputs.yml"
+    _write_inputs(input_path)
+    aggregates_path = tmp_path / "data/meta/weekly_aggregates.jsonl"
+    _write_weekly_aggregates(
+        aggregates_path,
+        [
+            {
+                "week": "2026-W05",
+                "item_count": 20,
+                "category_counts": {"macroeconomics": 4, "rates": 3, "equities": 1},
+                "keyword_counts": {"inflation": 2, "rate hike": 1, "growth": 0, "earnings": 0},
+            },
+            {
+                "week": "2026-W06",
+                "item_count": 24,
+                "category_counts": {"macroeconomics": 6, "rates": 5, "equities": 1},
+                "keyword_counts": {"inflation": 4, "rate hike": 2, "recession": 1},
+            },
+        ],
+    )
+
+    draft_path, _ = draft_policy(
+        input_path=str(input_path),
+        draft_path=str(tmp_path / "data/policy/policy_draft.yml"),
+        report_dir=str(tmp_path / "reports"),
+        weekly_aggregates_path=str(aggregates_path),
+        week="2026-W06",
+        max_signal_tilt_pct=5,
+    )
+    draft = yaml.safe_load(draft_path.read_text(encoding="utf-8"))
+    overlay = draft.get("signal_overlay") or {}
+    assert overlay.get("state") == "risk_off"
+    assert int(overlay.get("tilt_pct") or 0) == 5
+
+    balanced = draft["candidates"]["balanced"]
+    assert _bucket_pct(balanced, "global_equity") == 55
+    assert _bucket_pct(balanced, "bonds_cashlike") == 40
+    assert _bucket_pct(balanced, "optional_gold") == 5
+    assert "signal_overlay" in balanced.get("notes", {})
+
+
+def test_ips_draft_bootstrap_risk_on_overlay_is_capped(tmp_path: Path):
+    input_path = tmp_path / "data/policy/ips_inputs.yml"
+    _write_inputs(input_path)
+    aggregates_path = tmp_path / "data/meta/weekly_aggregates.jsonl"
+    _write_weekly_aggregates(
+        aggregates_path,
+        [
+            {
+                "week": "2026-W06",
+                "item_count": 30,
+                "category_counts": {"equities": 10, "macroeconomics": 1, "rates": 1},
+                "keyword_counts": {"growth": 6, "earnings": 5, "rate cut": 2},
+            }
+        ],
+    )
+
+    draft_path, _ = draft_policy(
+        input_path=str(input_path),
+        draft_path=str(tmp_path / "data/policy/policy_draft.yml"),
+        report_dir=str(tmp_path / "reports"),
+        weekly_aggregates_path=str(aggregates_path),
+        week="2026-W06",
+        max_signal_tilt_pct=5,
+    )
+    draft = yaml.safe_load(draft_path.read_text(encoding="utf-8"))
+    overlay = draft.get("signal_overlay") or {}
+    assert overlay.get("state") == "risk_on"
+    # Bootstrap mode (no previous week) caps tilt to 2pp for stability.
+    assert int(overlay.get("tilt_pct") or 0) == 2
+
+    balanced = draft["candidates"]["balanced"]
+    assert _bucket_pct(balanced, "global_equity") == 62
+    assert _bucket_pct(balanced, "bonds_cashlike") == 33
+    assert _bucket_pct(balanced, "optional_gold") == 5
+
+
+def test_finalize_policy_carries_signal_overlay_context(tmp_path: Path):
+    input_path = tmp_path / "data/policy/ips_inputs.yml"
+    _write_inputs(input_path)
+    aggregates_path = tmp_path / "data/meta/weekly_aggregates.jsonl"
+    _write_weekly_aggregates(
+        aggregates_path,
+        [
+            {
+                "week": "2026-W05",
+                "item_count": 22,
+                "category_counts": {"macroeconomics": 3, "rates": 2, "equities": 1},
+                "keyword_counts": {"inflation": 2, "rate hike": 1},
+            },
+            {
+                "week": "2026-W06",
+                "item_count": 25,
+                "category_counts": {"macroeconomics": 5, "rates": 4, "equities": 1},
+                "keyword_counts": {"inflation": 4, "rate hike": 2, "recession": 1},
+            },
+        ],
+    )
+    draft_path, _ = draft_policy(
+        input_path=str(input_path),
+        draft_path=str(tmp_path / "data/policy/policy_draft.yml"),
+        report_dir=str(tmp_path / "reports"),
+        weekly_aggregates_path=str(aggregates_path),
+        week="2026-W06",
+        max_signal_tilt_pct=5,
+    )
+
+    out_policy, _ = finalize_policy(
+        choice="balanced",
+        draft_path=str(draft_path),
+        policy_path=str(tmp_path / "data/policy/policy.yml"),
+        history_path=str(tmp_path / "data/policy/policy_history.jsonl"),
+    )
+    policy_doc = yaml.safe_load(out_policy.read_text(encoding="utf-8"))
+    overlay = policy_doc.get("signal_overlay") or {}
+    assert overlay.get("state") == "risk_off"
+    assert overlay.get("week") == "2026-W06"
+    assert int(overlay.get("tilt_pct") or 0) == 5
+    assert isinstance(overlay.get("drivers"), list)
+
+
+def test_ips_draft_caps_tilt_from_simulation_feedback_risk_guardrails(tmp_path: Path):
+    input_path = tmp_path / "data/policy/ips_inputs.yml"
+    _write_inputs(input_path)
+    aggregates_path = tmp_path / "data/meta/weekly_aggregates.jsonl"
+    _write_weekly_aggregates(
+        aggregates_path,
+        [
+            {
+                "week": "2026-W05",
+                "item_count": 20,
+                "category_counts": {"macroeconomics": 4, "rates": 3, "equities": 1},
+                "keyword_counts": {"inflation": 2, "rate hike": 1},
+            },
+            {
+                "week": "2026-W06",
+                "item_count": 24,
+                "category_counts": {"macroeconomics": 6, "rates": 5, "equities": 1},
+                "keyword_counts": {"inflation": 4, "rate hike": 2, "recession": 1},
+            },
+        ],
+    )
+    sim_path = tmp_path / "sim/portfolio_2024-01_2025-12.json"
+    _write_simulation_payload(
+        sim_path,
+        {
+            "cagr": 0.04,
+            "annualized_volatility": 0.27,
+            "max_drawdown": -0.21,
+        },
+    )
+
+    draft_path, _ = draft_policy(
+        input_path=str(input_path),
+        draft_path=str(tmp_path / "data/policy/policy_draft.yml"),
+        report_dir=str(tmp_path / "reports"),
+        weekly_aggregates_path=str(aggregates_path),
+        week="2026-W06",
+        max_signal_tilt_pct=5,
+        simulation_feedback_path=str(sim_path),
+    )
+    draft = yaml.safe_load(draft_path.read_text(encoding="utf-8"))
+    overlay = draft.get("signal_overlay") or {}
+    calibration = overlay.get("calibration") or {}
+
+    assert overlay.get("state") == "risk_off"
+    assert int(calibration.get("requested_max_tilt_pct") or 0) == 5
+    assert int(calibration.get("effective_max_tilt_pct") or 0) == 2
+    assert int(overlay.get("tilt_pct") or 0) == 2
+    balanced = draft["candidates"]["balanced"]
+    assert _bucket_pct(balanced, "global_equity") == 58
+    assert _bucket_pct(balanced, "bonds_cashlike") == 37

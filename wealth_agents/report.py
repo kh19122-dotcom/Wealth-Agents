@@ -49,6 +49,8 @@ LOW_QUALITY_PDF_SUMMARY = (
 )
 LOW_QUALITY_PDF_SCORE_THRESHOLD = 0.55
 DEFAULT_WEEKLY_AGGREGATES_PATH = "data/meta/weekly_aggregates.jsonl"
+NON_ALNUM_RE = re.compile(r"[^a-z0-9가-힣\s]+")
+MULTISPACE_RE = re.compile(r"\s+")
 
 
 def weekly_filename(week: str) -> str:
@@ -122,35 +124,38 @@ def _dedup_settings(rules: dict) -> dict:
 
 
 def _tokenize_text(text: str, stopwords: set[str]) -> list[str]:
-    cleaned = re.sub(r"[^a-z0-9가-힣\s]+", " ", text.lower())
+    cleaned = NON_ALNUM_RE.sub(" ", text.lower())
     return [token for token in cleaned.split() if token and token not in stopwords]
 
 
-def _token_set(text: str, stopwords: set[str]) -> set[str]:
-    return set(_tokenize_text(text, stopwords))
-
-
-def _ngram_set(text: str, stopwords: set[str], n: int = 2) -> set[str]:
-    tokens = _tokenize_text(text, stopwords)
-    if len(tokens) < n:
-        return set()
-    return {" ".join(tokens[idx : idx + n]) for idx in range(0, len(tokens) - n + 1)}
-
-
 def _normalized_text(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9가-힣\s]+", " ", text.lower())).strip()
+    return MULTISPACE_RE.sub(" ", NON_ALNUM_RE.sub(" ", text.lower())).strip()
 
 
-def _jaccard_similarity(left: set[str], right: set[str]) -> float:
+def _jaccard_similarity(left: set[str] | frozenset[str], right: set[str] | frozenset[str]) -> float:
     union = left | right
     if not union:
         return 0.0
     return len(left & right) / len(union)
 
 
-def _text_similarity_metrics(text_a: str, text_b: str, stopwords: set[str]) -> tuple[float, float, float]:
-    token_jaccard = _jaccard_similarity(_token_set(text_a, stopwords), _token_set(text_b, stopwords))
-    ngram_jaccard = _jaccard_similarity(_ngram_set(text_a, stopwords, n=2), _ngram_set(text_b, stopwords, n=2))
+def _token_and_ngram_sets(text: str, stopwords: set[str], n: int = 2) -> tuple[set[str], set[str]]:
+    tokens = _tokenize_text(text, stopwords)
+    token_set = set(tokens)
+    if len(tokens) < n:
+        return token_set, set()
+    return token_set, {" ".join(tokens[idx : idx + n]) for idx in range(0, len(tokens) - n + 1)}
+
+
+def _text_similarity_metrics(
+    text_a: str,
+    text_b: str,
+    stopwords: set[str],
+) -> tuple[float, float, float]:
+    tokens_a, ngrams_a = _token_and_ngram_sets(text_a, stopwords, n=2)
+    tokens_b, ngrams_b = _token_and_ngram_sets(text_b, stopwords, n=2)
+    token_jaccard = _jaccard_similarity(tokens_a, tokens_b)
+    ngram_jaccard = _jaccard_similarity(ngrams_a, ngrams_b)
     sequence_ratio = SequenceMatcher(None, _normalized_text(text_a), _normalized_text(text_b)).ratio()
     return token_jaccard, ngram_jaccard, sequence_ratio
 
@@ -1018,8 +1023,6 @@ def generate_weekly_report(
     )
     weekly_items = _deduplicate_weekly_items(weekly_raw_items, rules=rules)
     duplicates_removed_count = len(weekly_raw_items) - len(weekly_items)
-    for item in weekly_items:
-        item["_score"] = score_item(item, rules=rules, week_end_ts=week_end.timestamp())
 
     prior_raw_items = _filter_week_items(
         all_items=all_items,
@@ -1030,8 +1033,6 @@ def generate_weekly_report(
     )
     prior_items = _deduplicate_weekly_items(prior_raw_items, rules=rules)
     prior_duplicates_removed = len(prior_raw_items) - len(prior_items)
-    for item in prior_items:
-        item["_score"] = score_item(item, rules=rules, week_end_ts=prev_week_end.timestamp())
 
     scored = sorted(weekly_items, key=lambda x: float(x.get("_score") or 0.0), reverse=True)
     top10_candidates = [item for item in scored if not _is_low_quality_pdf_item(item)]

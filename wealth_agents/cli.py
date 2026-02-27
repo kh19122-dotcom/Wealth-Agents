@@ -12,6 +12,11 @@ from .ips import (
     init_ips_files,
 )
 from .orders import propose_monthly_orders
+from .portfolio import (
+    generate_portfolio_drift_report,
+    import_portfolio_trades,
+    init_live_portfolio,
+)
 from .policy_review import apply_review_proposal, review_policy
 from .report import generate_weekly_report
 from .rss import collect_from_feeds_with_stats
@@ -60,6 +65,27 @@ def build_parser() -> argparse.ArgumentParser:
     ips_draft.add_argument("--input", default="data/policy/ips_inputs.yml")
     ips_draft.add_argument("--draft-output", default="data/policy/policy_draft.yml")
     ips_draft.add_argument("--report-dir", default="reports")
+    ips_draft.add_argument(
+        "--weekly-aggregates",
+        default="data/meta/weekly_aggregates.jsonl",
+        help="Optional weekly aggregate store for signal-aware tilts (default: data/meta/weekly_aggregates.jsonl)",
+    )
+    ips_draft.add_argument(
+        "--week",
+        default=None,
+        help="Optional ISO week (YYYY-Www) to anchor signal overlay; defaults to latest aggregate week.",
+    )
+    ips_draft.add_argument(
+        "--max-signal-tilt",
+        type=int,
+        default=5,
+        help="Maximum allocation tilt in percentage points from signal overlay (default: 5).",
+    )
+    ips_draft.add_argument(
+        "--simulation-feedback",
+        default=None,
+        help="Optional simulation JSON payload path to calibrate signal tilt guardrails.",
+    )
 
     ips_finalize = ips_sub.add_parser("finalize", help="Finalize one draft candidate")
     ips_finalize.add_argument("--choice", required=True, help="One of: conservative, balanced, aggressive")
@@ -130,6 +156,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Confirm policy mutation for --apply (required in non-interactive mode)",
     )
 
+    portfolio = sub.add_parser("portfolio", help="Live portfolio tracking and drift reporting")
+    portfolio_sub = portfolio.add_subparsers(dest="portfolio_command", required=True)
+
+    portfolio_init = portfolio_sub.add_parser("init", help="Initialize live portfolio state file")
+    portfolio_init.add_argument("--asof", default=None, help="As-of date in YYYY-MM-DD format")
+    portfolio_init.add_argument("--cash", type=float, default=0.0, help="Initial cash in EUR")
+    portfolio_init.add_argument("--policy", default="data/policy/policy.yml", help="Policy YAML path")
+    portfolio_init.add_argument("--live", default="data/portfolio/live.json", help="Live portfolio JSON path")
+    portfolio_init.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing live portfolio state file if it already exists",
+    )
+
+    portfolio_import = portfolio_sub.add_parser("import-trades", help="Import executed trades CSV into live state")
+    portfolio_import.add_argument("--csv", required=True, help="CSV path for executed trades")
+    portfolio_import.add_argument("--broker", default="generic", help="Broker CSV dialect (default: generic)")
+    portfolio_import.add_argument("--asof", default=None, help="Optional as-of date override YYYY-MM-DD")
+    portfolio_import.add_argument("--live", default="data/portfolio/live.json", help="Live portfolio JSON path")
+    portfolio_import.add_argument("--prices-dir", default="data/prices", help="Local price cache root directory")
+    portfolio_import.add_argument(
+        "--no-negative-cash",
+        action="store_true",
+        help="Reject import if resulting cash_eur would become negative",
+    )
+
+    portfolio_report = portfolio_sub.add_parser("report", help="Generate portfolio drift report vs policy")
+    portfolio_report.add_argument("--asof", default=None, help="As-of date in YYYY-MM-DD format")
+    portfolio_report.add_argument("--policy", default="data/policy/policy.yml", help="Policy YAML path")
+    portfolio_report.add_argument("--live", default="data/portfolio/live.json", help="Live portfolio JSON path")
+    portfolio_report.add_argument("--prices-dir", default="data/prices", help="Local price cache root directory")
+    portfolio_report.add_argument("--reports-dir", default="reports", help="Report output directory")
+    portfolio_report.add_argument("--prices-start", default=None, help="Optional price window start YYYY-MM-DD")
+    portfolio_report.add_argument("--prices-end", default=None, help="Optional price window end YYYY-MM-DD")
+
     return parser
 
 
@@ -194,6 +255,10 @@ def main() -> int:
                     input_path=args.input,
                     draft_path=args.draft_output,
                     report_dir=args.report_dir,
+                    weekly_aggregates_path=args.weekly_aggregates,
+                    week=args.week,
+                    max_signal_tilt_pct=args.max_signal_tilt,
+                    simulation_feedback_path=args.simulation_feedback,
                 )
                 logging.getLogger(__name__).info("IPS draft complete: draft=%s report=%s", draft_path, report_path)
                 return 0
@@ -331,6 +396,63 @@ def main() -> int:
                 )
                 logging.getLogger(__name__).info("Policy apply: applied=%s detail=%s", applied, message)
             return 0
+
+        if args.command == "portfolio":
+            if args.portfolio_command == "init":
+                live_path, _, initialized = init_live_portfolio(
+                    asof=args.asof,
+                    cash_eur=args.cash,
+                    policy_path=args.policy,
+                    live_path=args.live,
+                    force=args.force,
+                )
+                if initialized:
+                    logging.getLogger(__name__).info("Portfolio state initialized: %s", live_path)
+                else:
+                    logging.getLogger(__name__).info(
+                        "Portfolio state already exists (unchanged, use --force to overwrite): %s",
+                        live_path,
+                    )
+                return 0
+
+            if args.portfolio_command == "import-trades":
+                live_path, _, summary = import_portfolio_trades(
+                    csv_path=args.csv,
+                    broker=args.broker,
+                    asof=args.asof,
+                    live_path=args.live,
+                    prices_dir=args.prices_dir,
+                    no_negative_cash=args.no_negative_cash,
+                )
+                logging.getLogger(__name__).info(
+                    "Portfolio trades imported: file=%s imported=%s cash_eur=%.2f asof=%s",
+                    live_path,
+                    summary["imported_trades"],
+                    summary["cash_eur"],
+                    summary["asof"],
+                )
+                return 0
+
+            if args.portfolio_command == "report":
+                report_path, summary = generate_portfolio_drift_report(
+                    asof=args.asof,
+                    policy_path=args.policy,
+                    live_path=args.live,
+                    prices_dir=args.prices_dir,
+                    reports_dir=args.reports_dir,
+                    prices_start=args.prices_start,
+                    prices_end=args.prices_end,
+                )
+                ticker = summary.get("biggest_drift_ticker") or "n/a"
+                drift = float(summary.get("biggest_drift_pct") or 0.0) * 100.0
+                print(
+                    "total_value_eur="
+                    f"{float(summary['total_value_eur']):.2f} "
+                    f"biggest_drift={ticker} ({drift:+.2f}%) "
+                    f"report={report_path}"
+                )
+                logging.getLogger(__name__).info("Portfolio drift report generated: %s", report_path)
+                return 0
     except (ValueError, RuntimeError) as exc:
         logging.getLogger(__name__).error(str(exc))
         return 1

@@ -1,6 +1,8 @@
 from datetime import date, datetime, timezone
+import json
 from pathlib import Path
-from typing import Any
+import re
+from typing import Any, Optional
 
 from .policy import (
     append_policy_history,
@@ -11,6 +13,8 @@ from .policy import (
     validate_band_pct,
     write_yaml,
 )
+from .signals import risk_off_score, risk_on_score, top_regime_drivers
+from .storage import read_jsonl
 
 
 DEFAULT_INPUT_PATH = "data/policy/ips_inputs.yml"
@@ -19,6 +23,9 @@ DEFAULT_POLICY_PATH = "data/policy/policy.yml"
 DEFAULT_HISTORY_PATH = "data/policy/policy_history.jsonl"
 DEFAULT_QUESTIONS_PATH = "reports/ips_questions.md"
 DEFAULT_REPORT_DIR = "reports"
+DEFAULT_WEEKLY_AGGREGATES_PATH = "data/meta/weekly_aggregates.jsonl"
+DEFAULT_SIGNAL_MAX_TILT_PCT = 5
+ISO_WEEK_PATTERN = re.compile(r"^\d{4}-W\d{2}$")
 
 
 def init_ips_files(
@@ -98,22 +105,37 @@ def draft_policy(
     input_path: str = DEFAULT_INPUT_PATH,
     draft_path: str = DEFAULT_DRAFT_PATH,
     report_dir: str = DEFAULT_REPORT_DIR,
+    weekly_aggregates_path: Optional[str] = None,
+    week: Optional[str] = None,
+    max_signal_tilt_pct: int = DEFAULT_SIGNAL_MAX_TILT_PCT,
+    simulation_feedback_path: Optional[str] = None,
 ) -> tuple[Path, Path]:
     user_input = read_yaml(input_path)
     merged = _merge_defaults(user_input, _default_inputs())
     _validate_inputs(merged)
+    calibrated_max_tilt, calibration = _calibrate_signal_tilt_cap(
+        max_signal_tilt_pct=max_signal_tilt_pct,
+        simulation_feedback_path=simulation_feedback_path,
+    )
+    signal_overlay = _build_signal_overlay(
+        weekly_aggregates_path=weekly_aggregates_path,
+        week=week,
+        max_signal_tilt_pct=calibrated_max_tilt,
+        calibration=calibration,
+    )
 
-    candidates = _build_candidates(merged)
+    candidates = _build_candidates(merged, signal_overlay=signal_overlay)
     draft_doc = {
         "generated_at": _now_iso8601(),
         "inputs_snapshot": merged,
+        "signal_overlay": signal_overlay,
         "candidates": candidates,
     }
     out_draft = write_yaml(draft_path, draft_doc)
 
     report_path = Path(report_dir) / f"ips_{date.today().isoformat()}.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(_render_ips_report(merged, candidates), encoding="utf-8")
+    report_path.write_text(_render_ips_report(merged, candidates, signal_overlay=signal_overlay), encoding="utf-8")
     return out_draft, report_path
 
 
@@ -136,6 +158,8 @@ def finalize_policy(
     version = date.today().isoformat()
     selected = to_jsonable_copy(candidates[choice])
     inputs_snapshot = to_jsonable_copy(draft_doc.get("inputs_snapshot") or {})
+    signal_overlay = draft_doc.get("signal_overlay")
+    signal_overlay_copy = to_jsonable_copy(signal_overlay) if isinstance(signal_overlay, dict) else None
 
     # Thesis satellite sleeve (default: disabled)
     mode = str(inputs_snapshot.get("mode", "")).strip().lower()
@@ -173,6 +197,8 @@ def finalize_policy(
         "inputs_snapshot": inputs_snapshot,
         "policy": selected,
     }
+    if signal_overlay_copy:
+        policy_doc["signal_overlay"] = signal_overlay_copy
 
     # Optional: annotate finalized policy notes with IPS meta (e.g., scout mode)
     mode = str(inputs_snapshot.get("mode", "")).strip().lower()
@@ -223,12 +249,11 @@ def _default_inputs() -> dict[str, Any]:
         "cash_buffer_eur": 10000,
         "horizon_years": 10,
         "risk_tolerance": "medium",
+        "mode": "standard",
+        "review_after_months": None,
         "contribution_plan": {
             "type": "lump_sum_split",
             "months": 12,
-        "mode": "standard",
-        "review_after_months": None,
-
         },
         "allowed_assets": {
             "equities": True,
@@ -330,7 +355,260 @@ def _validate_positive_int(name: str, value: Any) -> None:
         raise ValueError(f"{name} must be a positive integer.")
 
 
-def _build_candidates(inputs: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _build_signal_overlay(
+    weekly_aggregates_path: Optional[str],
+    week: Optional[str],
+    max_signal_tilt_pct: int,
+    calibration: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    max_tilt = max(0, int(max_signal_tilt_pct))
+    base = {
+        "enabled": False,
+        "week": None,
+        "previous_week": None,
+        "state": "neutral",
+        "tilt_pct": 0,
+        "max_tilt_pct": max_tilt,
+        "risk_off_score": 0,
+        "risk_on_score": 0,
+        "net_score": 0,
+        "drivers": [],
+        "calibration": calibration or {
+            "enabled": False,
+            "requested_max_tilt_pct": max_tilt,
+            "effective_max_tilt_pct": max_tilt,
+            "reason": "No simulation feedback calibration applied.",
+        },
+        "reason": "No weekly aggregate signal source configured.",
+    }
+
+    if not weekly_aggregates_path:
+        return base
+
+    aggregate_path = Path(weekly_aggregates_path)
+    if not aggregate_path.exists():
+        base["reason"] = f"Weekly aggregates not found: {aggregate_path}"
+        return base
+
+    by_week: dict[str, dict[str, Any]] = {}
+    for row in read_jsonl(aggregate_path):
+        if not isinstance(row, dict):
+            continue
+        normalized = _try_normalize_week(row.get("week"))
+        if not normalized:
+            continue
+        by_week[normalized] = row
+    if not by_week:
+        base["reason"] = f"No valid weekly aggregate rows found in {aggregate_path}."
+        return base
+
+    target_week = _normalize_week_or_raise(week) if week else sorted(by_week.keys())[-1]
+    current = by_week.get(target_week)
+    if current is None:
+        raise ValueError(f"Requested week {target_week} not found in weekly aggregates: {aggregate_path}")
+    previous_week = _previous_week_key(target_week)
+    previous = by_week.get(previous_week)
+
+    risk_off = risk_off_score(current)
+    risk_on = risk_on_score(current)
+    net_score = risk_off - risk_on
+    state = "neutral"
+    tilt = 0
+    if net_score >= 2:
+        state = "risk_off"
+        tilt = 4 if net_score >= 6 else 2
+    elif net_score <= -2:
+        state = "risk_on"
+        tilt = 4 if net_score <= -6 else 2
+
+    if previous is None:
+        tilt = min(tilt, 2)
+    else:
+        prev_net_score = risk_off_score(previous) - risk_on_score(previous)
+        if tilt > 0 and ((net_score > 0 and prev_net_score > 0) or (net_score < 0 and prev_net_score < 0)):
+            tilt += 1
+
+    item_count = int(current.get("item_count") or 0)
+    if item_count > 0 and item_count < 8:
+        tilt = max(0, tilt - 1)
+    tilt = min(max_tilt, tilt)
+    if tilt == 0:
+        state = "neutral"
+
+    reason = "Signal threshold not met; no allocation tilt applied."
+    if state == "risk_off":
+        reason = (
+            f"Risk-off signal detected from weekly aggregates (risk_off_score={risk_off}, risk_on_score={risk_on}); "
+            f"apply defensive tilt of {tilt}pp from global_equity to bonds_cashlike."
+        )
+    elif state == "risk_on":
+        reason = (
+            f"Risk-on signal detected from weekly aggregates (risk_off_score={risk_off}, risk_on_score={risk_on}); "
+            f"apply pro-risk tilt of {tilt}pp from bonds_cashlike to global_equity."
+        )
+
+    return {
+        "enabled": tilt > 0,
+        "week": target_week,
+        "previous_week": previous_week if previous is not None else None,
+        "state": state,
+        "tilt_pct": int(tilt),
+        "max_tilt_pct": max_tilt,
+        "risk_off_score": int(risk_off),
+        "risk_on_score": int(risk_on),
+        "net_score": int(net_score),
+        "drivers": top_regime_drivers(current, limit=5),
+        "calibration": base.get("calibration"),
+        "reason": reason,
+    }
+
+
+def _calibrate_signal_tilt_cap(
+    max_signal_tilt_pct: int,
+    simulation_feedback_path: Optional[str],
+) -> tuple[int, dict[str, Any]]:
+    requested_cap = max(0, int(max_signal_tilt_pct))
+    calibration = {
+        "enabled": False,
+        "source_path": simulation_feedback_path,
+        "requested_max_tilt_pct": requested_cap,
+        "effective_max_tilt_pct": requested_cap,
+        "reason": "No simulation feedback calibration applied.",
+        "stats": {},
+    }
+    if not simulation_feedback_path:
+        return requested_cap, calibration
+
+    path = Path(simulation_feedback_path)
+    if not path.exists():
+        calibration["reason"] = f"Simulation feedback file not found: {path}"
+        return requested_cap, calibration
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        calibration["reason"] = f"Failed to parse simulation feedback JSON: {path}"
+        return requested_cap, calibration
+
+    if not isinstance(payload, dict):
+        calibration["reason"] = f"Simulation feedback payload is not a JSON object: {path}"
+        return requested_cap, calibration
+    stats_raw = payload.get("stats")
+    if not isinstance(stats_raw, dict):
+        calibration["reason"] = f"Simulation feedback is missing stats object: {path}"
+        return requested_cap, calibration
+
+    cagr = _as_float_or_none(stats_raw.get("cagr"))
+    annualized_vol = _as_float_or_none(stats_raw.get("annualized_volatility"))
+    max_drawdown = _as_float_or_none(stats_raw.get("max_drawdown"))
+    calibration["enabled"] = True
+    calibration["stats"] = {
+        "cagr": cagr,
+        "annualized_volatility": annualized_vol,
+        "max_drawdown": max_drawdown,
+    }
+
+    effective_cap = requested_cap
+    reason = "Simulation feedback within guardrail range; keep requested signal tilt cap."
+    if max_drawdown is not None and max_drawdown <= -0.25:
+        effective_cap = min(effective_cap, 1)
+        reason = (
+            "Severe drawdown in backtest (max_drawdown <= -25%); cap signal tilt to 1pp "
+            "to prioritize report/proposal stability."
+        )
+    elif (annualized_vol is not None and annualized_vol >= 0.25) or (
+        max_drawdown is not None and max_drawdown <= -0.18
+    ):
+        effective_cap = min(effective_cap, 2)
+        reason = (
+            "High volatility/drawdown regime in backtest; cap signal tilt to 2pp to reduce regime overreaction."
+        )
+    elif (annualized_vol is not None and annualized_vol >= 0.18) or (
+        max_drawdown is not None and max_drawdown <= -0.12
+    ):
+        effective_cap = min(effective_cap, 3)
+        reason = "Moderate volatility/drawdown in backtest; cap signal tilt to 3pp."
+    elif cagr is not None and cagr < 0:
+        effective_cap = min(effective_cap, 2)
+        reason = "Negative TWR CAGR in backtest; cap signal tilt to 2pp."
+
+    calibration["effective_max_tilt_pct"] = int(effective_cap)
+    calibration["reason"] = reason
+    return int(effective_cap), calibration
+
+
+def _as_float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_week_or_raise(value: Optional[str]) -> str:
+    text = str(value or "").strip()
+    if not ISO_WEEK_PATTERN.match(text):
+        raise ValueError("week must be in ISO format YYYY-Www (e.g., 2026-W06).")
+    try:
+        year_str, week_str = text.split("-W")
+        year = int(year_str)
+        iso_week = int(week_str)
+        start = date.fromisocalendar(year, iso_week, 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("week must be a valid ISO week in format YYYY-Www.") from exc
+    return f"{start.isocalendar().year}-W{start.isocalendar().week:02d}"
+
+
+def _try_normalize_week(value: object) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return _normalize_week_or_raise(text)
+    except ValueError:
+        return None
+
+
+def _previous_week_key(week: str) -> str:
+    normalized = _normalize_week_or_raise(week)
+    year_str, week_str = normalized.split("-W")
+    start = date.fromisocalendar(int(year_str), int(week_str), 1)
+    previous = start.fromordinal(start.toordinal() - 7)
+    iso = previous.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+
+
+def _apply_signal_overlay_to_weights(
+    weights: dict[str, float],
+    signal_overlay: Optional[dict[str, Any]],
+) -> dict[str, float]:
+    if not signal_overlay:
+        return dict(weights)
+    state = str(signal_overlay.get("state") or "neutral").strip().lower()
+    tilt = int(signal_overlay.get("tilt_pct") or 0)
+    if tilt <= 0 or state not in {"risk_off", "risk_on"}:
+        return dict(weights)
+
+    adjusted = dict(weights)
+    equity = float(adjusted.get("global_equity", 0.0))
+    bonds = float(adjusted.get("bonds_cashlike", 0.0))
+    if state == "risk_off":
+        move = min(float(tilt), max(0.0, equity))
+        adjusted["global_equity"] = equity - move
+        adjusted["bonds_cashlike"] = bonds + move
+        return adjusted
+
+    move = min(float(tilt), max(0.0, bonds))
+    adjusted["global_equity"] = equity + move
+    adjusted["bonds_cashlike"] = bonds - move
+    return adjusted
+
+
+def _build_candidates(
+    inputs: dict[str, Any],
+    signal_overlay: Optional[dict[str, Any]] = None,
+) -> dict[str, dict[str, Any]]:
     profiles = {
         "conservative": {
             "global_equity": 30.0,
@@ -374,16 +652,26 @@ def _build_candidates(inputs: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
     out: dict[str, dict[str, Any]] = {}
     for name, profile in profiles.items():
+        base_weights = {
+            "global_equity": profile["global_equity"],
+            "bonds_cashlike": profile["bonds_cashlike"],
+            "optional_gold": profile["optional_gold"],
+        }
+        signal_adjusted_weights = _apply_signal_overlay_to_weights(base_weights, signal_overlay)
         adjusted = _adjust_weights_for_allowed_assets(
-            {
-                "global_equity": profile["global_equity"],
-                "bonds_cashlike": profile["bonds_cashlike"],
-                "optional_gold": profile["optional_gold"],
-            },
+            signal_adjusted_weights,
             allowed_assets,
         )
         allocation = [{"bucket": bucket, "pct": pct} for bucket, pct in adjusted.items() if pct > 0]
         validate_allocation_sum(allocation)
+        notes = {
+            "rationale": profile["pros"],
+            "risks": profile["risks"],
+            "pros": profile["pros"],
+            "cons": profile["cons"],
+        }
+        if signal_overlay and int(signal_overlay.get("tilt_pct") or 0) > 0:
+            notes["signal_overlay"] = str(signal_overlay.get("reason") or "")
         out[name] = {
             "target_allocation": allocation,
             "rebalance_rules": {
@@ -400,12 +688,7 @@ def _build_candidates(inputs: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 "max_single_asset_pct": profile["max_single_asset_pct"],
                 "min_trade_eur": 50,
             },
-            "notes": {
-                "rationale": profile["pros"],
-                "risks": profile["risks"],
-                "pros": profile["pros"],
-                "cons": profile["cons"],
-            },
+            "notes": notes,
         }
     return out
 
@@ -474,7 +757,11 @@ def _normalize_to_100(weights: dict[str, float]) -> dict[str, int]:
     return ints
 
 
-def _render_ips_report(inputs: dict[str, Any], candidates: dict[str, dict[str, Any]]) -> str:
+def _render_ips_report(
+    inputs: dict[str, Any],
+    candidates: dict[str, dict[str, Any]],
+    signal_overlay: Optional[dict[str, Any]] = None,
+) -> str:
     lines: list[str] = []
     lines.append(f"# IPS Draft {date.today().isoformat()}")
     lines.append("")
@@ -491,6 +778,32 @@ def _render_ips_report(inputs: dict[str, Any], candidates: dict[str, dict[str, A
     lines.append(
         f"- rebalance: {inputs['rebalance']['frequency']} with band {inputs['rebalance']['band_pct']}%"
     )
+    lines.append("")
+    lines.append("## Signal Overlay")
+    lines.append("")
+    overlay = signal_overlay or {}
+    lines.append(f"- state: {overlay.get('state', 'neutral')}")
+    lines.append(f"- week: {overlay.get('week')}")
+    lines.append(f"- previous_week: {overlay.get('previous_week')}")
+    lines.append(f"- tilt_pct: {overlay.get('tilt_pct', 0)}")
+    lines.append(f"- risk_off_score: {overlay.get('risk_off_score', 0)}")
+    lines.append(f"- risk_on_score: {overlay.get('risk_on_score', 0)}")
+    calibration = overlay.get("calibration")
+    if isinstance(calibration, dict):
+        lines.append(f"- requested_max_tilt_pct: {calibration.get('requested_max_tilt_pct')}")
+        lines.append(f"- effective_max_tilt_pct: {calibration.get('effective_max_tilt_pct')}")
+        lines.append(f"- calibration_reason: {calibration.get('reason')}")
+    lines.append(f"- reason: {overlay.get('reason', 'No overlay signal.')}")
+    drivers = list(overlay.get("drivers") or [])
+    if drivers:
+        lines.append("")
+        lines.append("| direction | kind | term | count | contribution |")
+        lines.append("| --- | --- | --- | ---: | ---: |")
+        for row in drivers:
+            lines.append(
+                f"| {row.get('direction')} | {row.get('kind')} | {row.get('term')} | "
+                f"{row.get('count')} | {row.get('contribution')} |"
+            )
     lines.append("")
     lines.append("## Candidates")
     lines.append("")
@@ -548,6 +861,11 @@ def _render_ips_report_md(policy_doc: dict[str, Any], draft_doc: dict[str, Any] 
     pol = policy_doc.get("policy") or {}
     selected_name = policy_doc.get("selected_candidate", "unknown")
     notes = (pol.get("notes") or {}) if isinstance(pol.get("notes"), dict) else {}
+    signal_overlay = policy_doc.get("signal_overlay")
+    if not isinstance(signal_overlay, dict):
+        signal_overlay = (draft_doc or {}).get("signal_overlay")
+    if not isinstance(signal_overlay, dict):
+        signal_overlay = {}
 
     investable = inputs.get("investable_amount_eur")
     cash_buf = inputs.get("cash_buffer_eur")
@@ -628,6 +946,32 @@ def _render_ips_report_md(policy_doc: dict[str, Any], draft_doc: dict[str, Any] 
             if k in notes and notes.get(k):
                 lines.append(f"- **{k}**: {notes.get(k)}")
     lines.append("")
+    lines.append("## Signal Context")
+    lines.append(f"- state: {signal_overlay.get('state', 'neutral')}")
+    lines.append(f"- week: {signal_overlay.get('week')}")
+    lines.append(f"- previous_week: {signal_overlay.get('previous_week')}")
+    lines.append(f"- tilt_pct: {signal_overlay.get('tilt_pct', 0)}")
+    lines.append(f"- risk_off_score: {signal_overlay.get('risk_off_score', 0)}")
+    lines.append(f"- risk_on_score: {signal_overlay.get('risk_on_score', 0)}")
+    calibration = signal_overlay.get("calibration")
+    if isinstance(calibration, dict):
+        lines.append(f"- requested_max_tilt_pct: {calibration.get('requested_max_tilt_pct')}")
+        lines.append(f"- effective_max_tilt_pct: {calibration.get('effective_max_tilt_pct')}")
+        lines.append(f"- calibration_reason: {calibration.get('reason')}")
+    lines.append(f"- reason: {signal_overlay.get('reason', 'No overlay signal.')}")
+    drivers = signal_overlay.get("drivers")
+    if isinstance(drivers, list) and drivers:
+        lines.append("")
+        lines.append("| direction | kind | term | count | contribution |")
+        lines.append("|---|---|---|---:|---:|")
+        for row in drivers:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                f"| {row.get('direction')} | {row.get('kind')} | {row.get('term')} | "
+                f"{row.get('count')} | {row.get('contribution')} |"
+            )
+    lines.append("")
     if rows:
         lines.append("## Candidate Comparison")
         lines.append("| candidate | equity | bonds/cashlike | gold | max_single_asset_pct |")
@@ -640,4 +984,3 @@ def _render_ips_report_md(policy_doc: dict[str, Any], draft_doc: dict[str, Any] 
         lines.append(f"{i}. {item}")
     lines.append("")
     return "\n".join(lines)
-

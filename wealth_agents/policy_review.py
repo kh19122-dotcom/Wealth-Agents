@@ -8,6 +8,7 @@ import sys
 from typing import Any
 
 from .policy import read_yaml, stable_policy_hash, validate_allocation_sum, write_yaml
+from .signals import phase25_risk_off_score
 from .storage import append_jsonl, read_jsonl
 
 
@@ -342,10 +343,7 @@ def _top_category_signals(current: dict[str, Any], previous: dict[str, Any] | No
 
 
 def _keyword_risk_score(current: dict[str, Any] | None) -> int:
-    if current is None:
-        return 0
-    keyword_counts = _as_int_map(current.get("keyword_counts"))
-    return int(keyword_counts.get("inflation", 0)) + int(keyword_counts.get("rate hike", 0))
+    return phase25_risk_off_score(current)
 
 
 def _apply_guardrail_decision(

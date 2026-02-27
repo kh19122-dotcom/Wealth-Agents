@@ -1,4 +1,5 @@
 from collections import Counter
+from functools import lru_cache
 import re
 from typing import Any
 
@@ -13,11 +14,16 @@ def load_rules(path: str) -> dict[str, Any]:
     return load_config(path)
 
 
+@lru_cache(maxsize=1024)
+def _keyword_pattern(lowered_keyword: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<!\w){re.escape(lowered_keyword)}(?!\w)")
+
+
 def _keyword_match(text: str, keyword: str) -> bool:
     lowered = str(keyword or "").strip().lower()
     if not lowered:
         return False
-    pattern = re.compile(rf"(?<!\w){re.escape(lowered)}(?!\w)")
+    pattern = _keyword_pattern(lowered)
     return pattern.search(text) is not None
 
 

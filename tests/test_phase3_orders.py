@@ -12,6 +12,37 @@ def _write_policy(path: Path) -> None:
         "created_at": "2026-02-08T21:15:14Z",
         "policy_hash": "phase3-smoke-hash",
         "selected_candidate": "balanced",
+        "signal_overlay": {
+            "enabled": True,
+            "week": "2026-W06",
+            "previous_week": "2026-W05",
+            "state": "risk_off",
+            "tilt_pct": 5,
+            "risk_off_score": 12,
+            "risk_on_score": 1,
+            "net_score": 11,
+            "calibration": {
+                "enabled": True,
+                "requested_max_tilt_pct": 5,
+                "effective_max_tilt_pct": 3,
+                "reason": "Moderate volatility/drawdown in backtest; cap signal tilt to 3pp.",
+                "stats": {
+                    "cagr": 0.08,
+                    "annualized_volatility": 0.2,
+                    "max_drawdown": -0.15,
+                },
+            },
+            "drivers": [
+                {
+                    "direction": "risk_off",
+                    "kind": "keyword",
+                    "term": "inflation",
+                    "count": 4,
+                    "contribution": 4,
+                }
+            ],
+            "reason": "Risk-off signal detected from weekly aggregates.",
+        },
         "inputs_snapshot": {
             "base_currency": "EUR",
         },
@@ -91,6 +122,12 @@ def test_propose_monthly_orders_smoke_deterministic_allocation(tmp_path: Path):
     assert persisted["assumptions"]["buy_only"] is True
     assert persisted["assumptions"]["allow_sells"] is False
     assert "rounding_method" in persisted["assumptions"]
+    assert persisted["policy_context"]["selected_candidate"] == "balanced"
+    assert persisted["policy_context"]["signal_overlay"]["state"] == "risk_off"
+    assert persisted["policy_context"]["signal_overlay"]["week"] == "2026-W06"
+    assert persisted["policy_context"]["signal_overlay"]["tilt_pct"] == 5
+    assert persisted["policy_context"]["signal_overlay"]["calibration"]["requested_max_tilt_pct"] == 5
+    assert persisted["policy_context"]["signal_overlay"]["calibration"]["effective_max_tilt_pct"] == 3
 
     assert sum(order["amount_eur"] for order in persisted["orders"]) == 2500
     assert all(order["side"] == "BUY" for order in persisted["orders"])
@@ -107,3 +144,9 @@ def test_propose_monthly_orders_smoke_deterministic_allocation(tmp_path: Path):
     assert amounts_by_instrument_id["ex_us_equity"] == 450
     assert amounts_by_instrument_id["xeon"] == 875
     assert amounts_by_instrument_id["xetra_gold"] == 125
+
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "## Policy Context" in report_text
+    assert "signal_state: risk_off" in report_text
+    assert "signal_tilt_pct: 5" in report_text
+    assert "signal_tilt_cap: requested=5 effective=3" in report_text

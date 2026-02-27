@@ -50,6 +50,7 @@ def propose_monthly_orders(
         policy_path_for_errors=policy_path,
     )
     payload = computed.payload
+    _validate_order_payload(payload)
 
     normalized_month = payload["month"]
     budget_eur = payload["budget_eur"]
@@ -78,6 +79,7 @@ def compute_monthly_order_payload(
     policy = _read_policy_section(policy_doc, policy_path_for_errors)
     policy_hash = _read_policy_hash(policy_doc, policy_path_for_errors)
     currency = _read_currency(policy_doc)
+    policy_context = _extract_policy_context(policy_doc, policy)
     if currency != "EUR":
         raise ValueError("Phase 3 MVP currently supports EUR-only policies.")
 
@@ -118,6 +120,8 @@ def compute_monthly_order_payload(
         },
         "orders": final_orders,
     }
+    if policy_context:
+        payload["policy_context"] = policy_context
     return OrderComputationResult(payload=payload, min_trade_rollups=min_trade_rollups)
 
 
@@ -153,6 +157,113 @@ def _read_currency(policy_doc: dict[str, Any]) -> str:
     else:
         currency = "EUR"
     return currency or "EUR"
+
+
+def _extract_policy_context(policy_doc: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    selected_candidate_raw = policy_doc.get("selected_candidate")
+    selected_candidate = str(selected_candidate_raw).strip() if selected_candidate_raw is not None else ""
+
+    signal_overlay = _sanitize_signal_overlay(policy_doc.get("signal_overlay"))
+    if signal_overlay is None:
+        notes = policy.get("notes")
+        if isinstance(notes, dict):
+            reason = str(notes.get("signal_overlay") or "").strip()
+            if reason:
+                signal_overlay = {
+                    "enabled": False,
+                    "state": "unknown",
+                    "week": None,
+                    "previous_week": None,
+                    "tilt_pct": 0,
+                    "risk_off_score": None,
+                    "risk_on_score": None,
+                    "net_score": None,
+                    "reason": reason,
+                    "drivers": [],
+                }
+
+    context: dict[str, Any] = {}
+    if selected_candidate:
+        context["selected_candidate"] = selected_candidate
+    if signal_overlay is not None:
+        context["signal_overlay"] = signal_overlay
+    return context
+
+
+def _sanitize_signal_overlay(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+
+    drivers_raw = raw.get("drivers")
+    drivers: list[dict[str, Any]] = []
+    if isinstance(drivers_raw, list):
+        for row in drivers_raw:
+            if not isinstance(row, dict):
+                continue
+            try:
+                count = int(row.get("count"))
+            except (TypeError, ValueError):
+                count = 0
+            try:
+                contribution = int(row.get("contribution"))
+            except (TypeError, ValueError):
+                contribution = 0
+            drivers.append(
+                {
+                    "direction": str(row.get("direction") or ""),
+                    "kind": str(row.get("kind") or ""),
+                    "term": str(row.get("term") or ""),
+                    "count": count,
+                    "contribution": contribution,
+                }
+            )
+
+    def _as_int_or_none(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    calibration_raw = raw.get("calibration")
+    calibration: dict[str, Any] | None = None
+    if isinstance(calibration_raw, dict):
+        calibration = {
+            "enabled": bool(calibration_raw.get("enabled")),
+            "requested_max_tilt_pct": _as_int_or_none(calibration_raw.get("requested_max_tilt_pct")),
+            "effective_max_tilt_pct": _as_int_or_none(calibration_raw.get("effective_max_tilt_pct")),
+            "reason": str(calibration_raw.get("reason") or ""),
+        }
+        stats_raw = calibration_raw.get("stats")
+        if isinstance(stats_raw, dict):
+            stats: dict[str, float | None] = {}
+            for key in ("cagr", "annualized_volatility", "max_drawdown"):
+                value = stats_raw.get(key)
+                if value is None:
+                    stats[key] = None
+                    continue
+                try:
+                    stats[key] = float(value)
+                except (TypeError, ValueError):
+                    stats[key] = None
+            calibration["stats"] = stats
+
+    sanitized = {
+        "enabled": bool(raw.get("enabled")),
+        "state": str(raw.get("state") or "neutral"),
+        "week": raw.get("week"),
+        "previous_week": raw.get("previous_week"),
+        "tilt_pct": _as_int_or_none(raw.get("tilt_pct")) or 0,
+        "risk_off_score": _as_int_or_none(raw.get("risk_off_score")),
+        "risk_on_score": _as_int_or_none(raw.get("risk_on_score")),
+        "net_score": _as_int_or_none(raw.get("net_score")),
+        "reason": str(raw.get("reason") or ""),
+        "drivers": drivers,
+    }
+    if calibration is not None:
+        sanitized["calibration"] = calibration
+    return sanitized
 
 
 def _resolve_budget_eur(policy: dict[str, Any], amount_eur: float | None) -> int:
@@ -431,6 +542,61 @@ def _build_orders(allocations: list[InstrumentAllocation]) -> list[dict[str, Any
     return orders
 
 
+def _validate_order_payload(payload: dict[str, Any]) -> None:
+    raw_orders = payload.get("orders")
+    if not isinstance(raw_orders, list) or not raw_orders:
+        raise RuntimeError("Internal order payload error: orders must be a non-empty list.")
+
+    seen_instrument_ids: set[str] = set()
+    total_amount = 0
+    for idx, order in enumerate(raw_orders, start=1):
+        if not isinstance(order, dict):
+            raise RuntimeError(f"Internal order payload error: order #{idx} must be a mapping.")
+        if str(order.get("side") or "").upper() != "BUY":
+            raise RuntimeError(f"Internal order payload error: order #{idx} has non-BUY side.")
+
+        instrument_id = str(order.get("instrument_id") or "").strip()
+        if not instrument_id:
+            raise RuntimeError(f"Internal order payload error: order #{idx} missing instrument_id.")
+        if instrument_id in seen_instrument_ids:
+            raise RuntimeError(
+                f"Internal order payload error: duplicate instrument_id '{instrument_id}' in final orders."
+            )
+        seen_instrument_ids.add(instrument_id)
+
+        try:
+            amount_eur = int(order.get("amount_eur"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Internal order payload error: order #{idx} has invalid amount_eur."
+            ) from exc
+        if amount_eur <= 0:
+            raise RuntimeError(
+                f"Internal order payload error: order #{idx} must have positive amount_eur."
+            )
+        total_amount += amount_eur
+
+    try:
+        budget_eur = int(payload.get("budget_eur"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Internal order payload error: budget_eur must be an integer.") from exc
+    if total_amount != budget_eur:
+        raise RuntimeError(
+            f"Internal order payload error: sum(orders.amount_eur)={total_amount}, budget_eur={budget_eur}."
+        )
+
+
+def _sorted_orders_for_render(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        orders,
+        key=lambda order: (
+            str(order.get("bucket") or ""),
+            str(order.get("instrument_id") or ""),
+            str(order.get("isin") or ""),
+        ),
+    )
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rendered = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
@@ -445,6 +611,7 @@ def _write_report(
     payload: dict[str, Any],
     min_trade_rollups: list[dict[str, Any]],
 ) -> None:
+    orders = _sorted_orders_for_render(payload["orders"])
     lines: list[str] = []
     lines.append(f"# Order Proposal {month}")
     lines.append("")
@@ -453,11 +620,44 @@ def _write_report(
     lines.append(f"- policy_hash: `{policy_hash}`")
     lines.append(f"- currency: {payload.get('currency')}")
     lines.append("")
+    policy_context = payload.get("policy_context")
+    if isinstance(policy_context, dict) and policy_context:
+        lines.append("## Policy Context")
+        lines.append("")
+        selected_candidate = policy_context.get("selected_candidate")
+        if selected_candidate:
+            lines.append(f"- selected_candidate: {selected_candidate}")
+        signal_overlay = policy_context.get("signal_overlay")
+        if isinstance(signal_overlay, dict):
+            lines.append(f"- signal_state: {signal_overlay.get('state', 'neutral')}")
+            lines.append(f"- signal_week: {signal_overlay.get('week')}")
+            lines.append(f"- signal_tilt_pct: {signal_overlay.get('tilt_pct', 0)}")
+            lines.append(f"- signal_reason: {signal_overlay.get('reason', '')}")
+            calibration = signal_overlay.get("calibration")
+            if isinstance(calibration, dict):
+                lines.append(
+                    f"- signal_tilt_cap: requested={calibration.get('requested_max_tilt_pct')} "
+                    f"effective={calibration.get('effective_max_tilt_pct')}"
+                )
+                lines.append(f"- signal_calibration_reason: {calibration.get('reason', '')}")
+            drivers = signal_overlay.get("drivers")
+            if isinstance(drivers, list) and drivers:
+                lines.append("")
+                lines.append("| direction | kind | term | count | contribution |")
+                lines.append("|---|---|---|---:|---:|")
+                for row in drivers:
+                    if not isinstance(row, dict):
+                        continue
+                    lines.append(
+                        f"| {row.get('direction')} | {row.get('kind')} | {row.get('term')} | "
+                        f"{row.get('count')} | {row.get('contribution')} |"
+                    )
+        lines.append("")
     lines.append("## Allocation")
     lines.append("")
     lines.append("| bucket | instrument_id | isin | name | amount_eur |")
     lines.append("|---|---|---|---|---:|")
-    for order in payload["orders"]:
+    for order in orders:
         lines.append(
             f"| {order['bucket']} | {order['instrument_id']} | {order['isin']} | {order['name']} | {order['amount_eur']} |"
         )
