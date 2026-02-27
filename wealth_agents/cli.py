@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from .feed_health import format_health_table, load_feed_health
+from .execution import execute_order_proposal
 from .fetch_prices import fetch_prices_for_policy
 from .ingest import ingest_manual_inputs
 from .ips import (
@@ -99,6 +100,33 @@ def build_parser() -> argparse.ArgumentParser:
     propose_orders.add_argument("--policy", default="data/policy/policy.yml")
     propose_orders.add_argument("--orders-dir", default="orders")
     propose_orders.add_argument("--reports-dir", default="reports")
+
+    execute_orders = sub.add_parser("execute-orders", help="Execute proposed orders via broker adapter")
+    execute_orders.add_argument(
+        "--proposal",
+        required=True,
+        help="Order proposal JSON path, e.g., orders/proposed_2026-03.json",
+    )
+    execute_orders.add_argument(
+        "--broker",
+        default="mock",
+        help="Broker adapter name (currently: mock)",
+    )
+    execute_orders.add_argument(
+        "--mock-state",
+        default="data/broker/mock_state.json",
+        help="Mock broker state JSON path",
+    )
+    execute_orders.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and render execution payload without submitting to broker",
+    )
+    execute_orders.add_argument(
+        "--output",
+        default=None,
+        help="Optional execution result JSON output path",
+    )
 
     fetch_prices = sub.add_parser(
         "fetch-prices",
@@ -288,6 +316,23 @@ def main() -> int:
                 "Order proposal complete: orders=%s report=%s",
                 orders_path,
                 report_path,
+            )
+            return 0
+
+        if args.command == "execute-orders":
+            result = execute_order_proposal(
+                proposal_path=args.proposal,
+                broker=args.broker,
+                mock_state_path=args.mock_state,
+                dry_run=args.dry_run,
+                output_path=args.output,
+            )
+            logging.getLogger(__name__).info(
+                "Order execution complete: broker=%s dry_run=%s submitted=%s skipped=%s",
+                result["broker"],
+                result["dry_run"],
+                result["submitted_count"],
+                result["skipped_count"],
             )
             return 0
 
