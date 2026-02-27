@@ -1,7 +1,14 @@
 import json
 from pathlib import Path
 
-from wealth_agents.orchestration import DEFAULT_STEP_SEQUENCE, run_cycle
+import pytest
+
+from wealth_agents.orchestration import (
+    DEFAULT_STEP_SEQUENCE,
+    _run_propose_orders,
+    _run_report,
+    run_cycle,
+)
 
 
 def test_run_cycle_writes_checkpoint_and_completes_all_steps(tmp_path: Path, monkeypatch):
@@ -225,3 +232,155 @@ def test_run_cycle_resume_skips_completed_steps(tmp_path: Path, monkeypatch):
         resume=True,
     )
     assert counts["collect"] == 1
+
+
+def test_run_report_quality_gate_fails_when_report_is_too_thin(tmp_path: Path, monkeypatch):
+    data_path = tmp_path / "data" / "raw" / "news.jsonl"
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    data_path.write_text(
+        json.dumps({"id": "n1", "title": "a", "summary": "b"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    collect_meta_path = tmp_path / "data" / "meta" / "last_collect.json"
+    collect_meta_path.parent.mkdir(parents=True, exist_ok=True)
+    collect_meta_path.write_text("{}", encoding="utf-8")
+    weekly_aggregates_path = tmp_path / "data" / "meta" / "weekly_aggregates.jsonl"
+    weekly_aggregates_path.write_text(
+        json.dumps(
+            {
+                "week": "2026-W09",
+                "item_count": 4,
+                "duplicates_removed_count": 8,
+                "category_counts": {"macroeconomics": 2, "equities": 1},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_generate_weekly_report(**kwargs):
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out = output_dir / "weekly_2026-W09.md"
+        out.write_text(
+            "\n".join(
+                [
+                    "# Weekly Report 2026-W09",
+                    "",
+                    "- week: 2026-W09",
+                    "- number_of_items_considered: 4",
+                    "- rss_collect_status: failed",
+                    "- korea_items_count: 0",
+                    "- germany_items_count: 0",
+                    "- duplicates_removed_count: 8",
+                    "",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return out
+
+    monkeypatch.setattr("wealth_agents.orchestration.generate_weekly_report", fake_generate_weekly_report)
+
+    with pytest.raises(ValueError, match="Report quality gate failed"):
+        _run_report(
+            week="2026-W09",
+            data_path=data_path,
+            rules_path="config/rules.yml",
+            report_dir=tmp_path / "reports",
+            collect_meta_path=collect_meta_path,
+            weekly_aggregates_path=weekly_aggregates_path,
+            quality_gate_profile="strict",
+        )
+
+
+def test_run_propose_orders_quality_gate_fails_on_concentration(tmp_path: Path, monkeypatch):
+    def fake_propose_monthly_orders(**kwargs):
+        orders_dir = Path(kwargs["orders_dir"])
+        report_dir = Path(kwargs["reports_dir"])
+        orders_dir.mkdir(parents=True, exist_ok=True)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        orders_path = orders_dir / "proposed_2026-03.json"
+        report_path = report_dir / "orders_2026-03.md"
+        payload = {
+            "month": "2026-03",
+            "currency": "EUR",
+            "budget_eur": 2500,
+            "policy_hash": "fake-hash",
+            "orders": [
+                {
+                    "side": "BUY",
+                    "instrument_id": "sp500_acc",
+                    "isin": "IE00B5BMR087",
+                    "name": "ETF",
+                    "bucket": "global_equity",
+                    "amount_eur": 2500,
+                }
+            ],
+        }
+        orders_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        report_path.write_text("# orders\n", encoding="utf-8")
+        return orders_path, report_path, payload
+
+    monkeypatch.setattr("wealth_agents.orchestration.propose_monthly_orders", fake_propose_monthly_orders)
+
+    with pytest.raises(ValueError, match="Orders quality gate failed"):
+        _run_propose_orders(
+            month="2026-03",
+            policy_path=tmp_path / "policy.yml",
+            orders_dir=tmp_path / "orders",
+            report_dir=tmp_path / "reports",
+            quality_gate_profile="strict",
+        )
+
+
+def test_run_propose_orders_quality_gate_passes_standard(tmp_path: Path, monkeypatch):
+    def fake_propose_monthly_orders(**kwargs):
+        orders_dir = Path(kwargs["orders_dir"])
+        report_dir = Path(kwargs["reports_dir"])
+        orders_dir.mkdir(parents=True, exist_ok=True)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        orders_path = orders_dir / "proposed_2026-03.json"
+        report_path = report_dir / "orders_2026-03.md"
+        payload = {
+            "month": "2026-03",
+            "currency": "EUR",
+            "budget_eur": 2500,
+            "policy_hash": "fake-hash",
+            "orders": [
+                {
+                    "side": "BUY",
+                    "instrument_id": "sp500_acc",
+                    "isin": "IE00B5BMR087",
+                    "name": "ETF 1",
+                    "bucket": "global_equity",
+                    "amount_eur": 1500,
+                },
+                {
+                    "side": "BUY",
+                    "instrument_id": "bond_eu_acc",
+                    "isin": "IE00B3F81R35",
+                    "name": "ETF 2",
+                    "bucket": "bonds",
+                    "amount_eur": 1000,
+                },
+            ],
+        }
+        orders_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        report_path.write_text("# orders\n", encoding="utf-8")
+        return orders_path, report_path, payload
+
+    monkeypatch.setattr("wealth_agents.orchestration.propose_monthly_orders", fake_propose_monthly_orders)
+
+    out = _run_propose_orders(
+        month="2026-03",
+        policy_path=tmp_path / "policy.yml",
+        orders_dir=tmp_path / "orders",
+        report_dir=tmp_path / "reports",
+        quality_gate_profile="standard",
+    )
+    quality = out["quality_gate"]
+    assert quality["profile"] == "standard"
+    assert quality["passed"] is True

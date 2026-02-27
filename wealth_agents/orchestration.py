@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from .execution import execute_order_proposal
@@ -11,7 +12,7 @@ from .orders import propose_monthly_orders
 from .report import generate_weekly_report
 from .rss import collect_from_feeds_with_stats
 from .simulation import run_simulation
-from .storage import append_unique_records, validate_jsonl
+from .storage import append_unique_records, read_jsonl, validate_jsonl
 
 
 DEFAULT_CYCLE_DIR = "runs"
@@ -21,6 +22,44 @@ DEFAULT_RULES_PATH = "config/rules.yml"
 DEFAULT_IPS_INPUT_PATH = "data/policy/ips_inputs.yml"
 DEFAULT_PRICES_DIR = "data/prices"
 DEFAULT_EXECUTE_BROKER = "mock"
+DEFAULT_QUALITY_GATE_PROFILE = "off"
+QUALITY_GATE_PROFILES: dict[str, dict[str, Any]] = {
+    "off": {
+        "report": {},
+        "orders": {},
+    },
+    "standard": {
+        "report": {
+            "min_items": 8,
+            "min_distinct_categories": 3,
+            "min_regional_items": 1,
+            "max_duplicates_ratio": 0.90,
+            "min_items_if_collect_failed": 12,
+        },
+        "orders": {
+            "min_orders": 2,
+            "min_unique_buckets": 2,
+            "min_unique_instruments": 2,
+            "max_single_order_share_pct": 80.0,
+        },
+    },
+    "strict": {
+        "report": {
+            "min_items": 12,
+            "min_distinct_categories": 4,
+            "min_regional_items": 2,
+            "max_duplicates_ratio": 0.80,
+            "min_items_if_collect_failed": 16,
+        },
+        "orders": {
+            "min_orders": 3,
+            "min_unique_buckets": 3,
+            "min_unique_instruments": 3,
+            "max_single_order_share_pct": 65.0,
+        },
+    },
+}
+_INT_RE = re.compile(r"^-?\d+$")
 DEFAULT_STEP_SEQUENCE = (
     "collect",
     "report",
@@ -54,7 +93,9 @@ def run_cycle(
     execute_dry_run: bool = True,
     skip_execution: bool = False,
     resume: bool = False,
+    quality_gate_profile: str = DEFAULT_QUALITY_GATE_PROFILE,
 ) -> dict[str, Any]:
+    quality_profile = _normalize_quality_gate_profile(quality_gate_profile)
     current_cycle_id = cycle_id or _default_cycle_id()
     root = Path(cycle_dir) / current_cycle_id
     checkpoint_path = root / "checkpoint.json"
@@ -137,12 +178,14 @@ def run_cycle(
             report_dir=report_dir,
             collect_meta_path=collect_meta_path,
             weekly_aggregates_path=weekly_aggregates_path,
+            quality_gate_profile=quality_profile,
         ),
     )
     artifacts.update(
         {
             "weekly_report_path": report_out.get("report_path"),
             "weekly_aggregates_path": str(weekly_aggregates_path),
+            "report_quality_gate": report_out.get("quality_gate"),
         }
     )
 
@@ -188,12 +231,14 @@ def run_cycle(
             policy_path=policy_path,
             orders_dir=orders_dir,
             report_dir=report_dir,
+            quality_gate_profile=quality_profile,
         ),
     )
     artifacts.update(
         {
             "orders_path": propose_out.get("orders_path"),
             "orders_report_path": propose_out.get("report_path"),
+            "orders_quality_gate": propose_out.get("quality_gate"),
         }
     )
 
@@ -282,6 +327,7 @@ def _run_report(
     report_dir: Path,
     collect_meta_path: Path,
     weekly_aggregates_path: Path,
+    quality_gate_profile: str = DEFAULT_QUALITY_GATE_PROFILE,
 ) -> dict[str, Any]:
     validate_jsonl(data_path)
     report_path = generate_weekly_report(
@@ -292,9 +338,16 @@ def _run_report(
         collect_meta_path=str(collect_meta_path),
         weekly_aggregates_path=str(weekly_aggregates_path),
     )
+    quality_gate = _evaluate_report_quality(
+        profile=quality_gate_profile,
+        week=week,
+        report_path=report_path,
+        weekly_aggregates_path=weekly_aggregates_path,
+    )
     return {
         "report_path": str(report_path),
         "weekly_aggregates_path": str(weekly_aggregates_path),
+        "quality_gate": quality_gate,
     }
 
 
@@ -348,6 +401,7 @@ def _run_propose_orders(
     policy_path: Path,
     orders_dir: Path,
     report_dir: Path,
+    quality_gate_profile: str = DEFAULT_QUALITY_GATE_PROFILE,
 ) -> dict[str, Any]:
     out_orders, out_report, payload = propose_monthly_orders(
         month=month,
@@ -355,11 +409,16 @@ def _run_propose_orders(
         orders_dir=str(orders_dir),
         reports_dir=str(report_dir),
     )
+    quality_gate = _evaluate_orders_quality(
+        profile=quality_gate_profile,
+        payload=payload,
+    )
     return {
         "orders_path": str(out_orders),
         "report_path": str(out_report),
         "orders_count": len(payload.get("orders") or []),
         "budget_eur": int(payload.get("budget_eur") or 0),
+        "quality_gate": quality_gate,
     }
 
 
@@ -416,6 +475,243 @@ def _run_execute_orders(
         "dry_run": bool(result.get("dry_run")),
         "month": month,
     }
+
+
+def _normalize_quality_gate_profile(profile: str) -> str:
+    value = str(profile or DEFAULT_QUALITY_GATE_PROFILE).strip().lower()
+    if value not in QUALITY_GATE_PROFILES:
+        raise ValueError(f"quality_gate_profile must be one of {sorted(QUALITY_GATE_PROFILES)}.")
+    return value
+
+
+def _evaluate_report_quality(
+    *,
+    profile: str,
+    week: str,
+    report_path: Path,
+    weekly_aggregates_path: Path,
+) -> dict[str, Any]:
+    normalized = _normalize_quality_gate_profile(profile)
+    thresholds = dict((QUALITY_GATE_PROFILES.get(normalized) or {}).get("report") or {})
+
+    report_meta = _read_report_metadata(report_path)
+    aggregate_row = _read_weekly_aggregate(path=weekly_aggregates_path, week=week)
+    category_counts = dict(aggregate_row.get("category_counts") or {})
+
+    item_count = _as_int(report_meta.get("number_of_items_considered"))
+    if item_count is None:
+        item_count = _as_int(aggregate_row.get("item_count")) or 0
+
+    duplicates_removed = _as_int(report_meta.get("duplicates_removed_count"))
+    if duplicates_removed is None:
+        duplicates_removed = _as_int(aggregate_row.get("duplicates_removed_count")) or 0
+
+    korea_items = _as_int(report_meta.get("korea_items_count")) or 0
+    germany_items = _as_int(report_meta.get("germany_items_count")) or 0
+    regional_items = korea_items + germany_items
+    distinct_categories = sum(1 for value in category_counts.values() if _as_int(value) and int(value) > 0)
+    denominator = max(1, item_count + duplicates_removed)
+    duplicates_ratio = float(duplicates_removed) / float(denominator)
+    rss_collect_status = str(report_meta.get("rss_collect_status") or "").strip().lower()
+
+    metrics = {
+        "item_count": int(item_count),
+        "duplicates_removed_count": int(duplicates_removed),
+        "distinct_categories": int(distinct_categories),
+        "korea_items_count": int(korea_items),
+        "germany_items_count": int(germany_items),
+        "regional_items_count": int(regional_items),
+        "duplicates_ratio": round(duplicates_ratio, 4),
+        "rss_collect_status": rss_collect_status or "unknown",
+    }
+
+    if normalized == "off":
+        return {
+            "profile": normalized,
+            "passed": True,
+            "thresholds": thresholds,
+            "metrics": metrics,
+            "violations": [],
+        }
+
+    violations: list[str] = []
+    min_items = int(thresholds.get("min_items") or 0)
+    min_distinct_categories = int(thresholds.get("min_distinct_categories") or 0)
+    min_regional_items = int(thresholds.get("min_regional_items") or 0)
+    max_duplicates_ratio = float(thresholds.get("max_duplicates_ratio") or 1.0)
+    min_items_if_collect_failed = int(thresholds.get("min_items_if_collect_failed") or min_items)
+
+    if item_count < min_items:
+        violations.append(f"item_count {item_count} < min_items {min_items}")
+    if distinct_categories < min_distinct_categories:
+        violations.append(
+            f"distinct_categories {distinct_categories} < min_distinct_categories {min_distinct_categories}"
+        )
+    if regional_items < min_regional_items:
+        violations.append(f"regional_items_count {regional_items} < min_regional_items {min_regional_items}")
+    if duplicates_ratio > max_duplicates_ratio:
+        violations.append(
+            f"duplicates_ratio {duplicates_ratio:.4f} > max_duplicates_ratio {max_duplicates_ratio:.4f}"
+        )
+    if rss_collect_status == "failed" and item_count < min_items_if_collect_failed:
+        violations.append(
+            "rss_collect_status failed requires "
+            f"item_count >= {min_items_if_collect_failed}, got {item_count}"
+        )
+
+    if violations:
+        raise ValueError(
+            "Report quality gate failed "
+            f"(profile={normalized}): " + "; ".join(violations)
+        )
+    return {
+        "profile": normalized,
+        "passed": True,
+        "thresholds": thresholds,
+        "metrics": metrics,
+        "violations": [],
+    }
+
+
+def _evaluate_orders_quality(*, profile: str, payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_quality_gate_profile(profile)
+    thresholds = dict((QUALITY_GATE_PROFILES.get(normalized) or {}).get("orders") or {})
+
+    orders_raw = payload.get("orders") or []
+    orders = [row for row in orders_raw if isinstance(row, dict)]
+    budget = _as_int(payload.get("budget_eur")) or 0
+    amounts = [_as_int(row.get("amount_eur")) or 0 for row in orders]
+    orders_count = len(orders)
+    total_amount = sum(amounts)
+    unique_buckets = len({str(row.get("bucket") or "").strip() for row in orders if str(row.get("bucket") or "").strip()})
+    unique_instruments = len(
+        {
+            str(row.get("instrument_id") or row.get("isin") or row.get("name") or "").strip()
+            for row in orders
+            if str(row.get("instrument_id") or row.get("isin") or row.get("name") or "").strip()
+        }
+    )
+    max_single_order_share_pct = 0.0
+    if budget > 0 and amounts:
+        max_single_order_share_pct = 100.0 * (max(amounts) / float(budget))
+
+    metrics = {
+        "orders_count": orders_count,
+        "budget_eur": budget,
+        "total_order_amount_eur": total_amount,
+        "unique_buckets": unique_buckets,
+        "unique_instruments": unique_instruments,
+        "max_single_order_share_pct": round(max_single_order_share_pct, 2),
+    }
+
+    if normalized == "off":
+        return {
+            "profile": normalized,
+            "passed": True,
+            "thresholds": thresholds,
+            "metrics": metrics,
+            "violations": [],
+        }
+
+    violations: list[str] = []
+    min_orders = int(thresholds.get("min_orders") or 0)
+    min_unique_buckets = int(thresholds.get("min_unique_buckets") or 0)
+    min_unique_instruments = int(thresholds.get("min_unique_instruments") or 0)
+    max_single_order_share_threshold = float(thresholds.get("max_single_order_share_pct") or 100.0)
+
+    if orders_count < min_orders:
+        violations.append(f"orders_count {orders_count} < min_orders {min_orders}")
+    if unique_buckets < min_unique_buckets:
+        violations.append(f"unique_buckets {unique_buckets} < min_unique_buckets {min_unique_buckets}")
+    if unique_instruments < min_unique_instruments:
+        violations.append(
+            f"unique_instruments {unique_instruments} < min_unique_instruments {min_unique_instruments}"
+        )
+    if max_single_order_share_pct > max_single_order_share_threshold:
+        violations.append(
+            "max_single_order_share_pct "
+            f"{max_single_order_share_pct:.2f} > {max_single_order_share_threshold:.2f}"
+        )
+    if budget <= 0:
+        violations.append(f"budget_eur must be positive, got {budget}")
+    if total_amount != budget:
+        violations.append(f"total_order_amount_eur {total_amount} != budget_eur {budget}")
+    if any(amount <= 0 for amount in amounts):
+        violations.append("all orders must have positive amount_eur")
+
+    if violations:
+        raise ValueError(
+            "Orders quality gate failed "
+            f"(profile={normalized}): " + "; ".join(violations)
+        )
+    return {
+        "profile": normalized,
+        "passed": True,
+        "thresholds": thresholds,
+        "metrics": metrics,
+        "violations": [],
+    }
+
+
+def _read_report_metadata(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+
+    metadata: dict[str, Any] = {}
+    in_header = False
+    for line in lines:
+        if line.startswith("- "):
+            in_header = True
+            body = line[2:]
+            if ":" not in body:
+                continue
+            key, value = body.split(":", 1)
+            metadata[key.strip()] = _parse_scalar(value.strip())
+            continue
+        if in_header:
+            if not line.strip():
+                break
+            break
+    return metadata
+
+
+def _read_weekly_aggregate(path: Path, week: str) -> dict[str, Any]:
+    rows = read_jsonl(path)
+    for row in rows:
+        row_week = str(row.get("week") or "").strip()
+        if row_week == week:
+            return row
+    return {}
+
+
+def _parse_scalar(value: str) -> Any:
+    text = str(value).strip()
+    if _INT_RE.match(text):
+        try:
+            return int(text)
+        except ValueError:
+            return text
+    return text
+
+
+def _as_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not _INT_RE.match(text):
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
 
 
 def _load_or_init_checkpoint(checkpoint_path: Path, cycle_id: str, root: Path) -> dict[str, Any]:

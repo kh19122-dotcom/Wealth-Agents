@@ -135,3 +135,25 @@ def test_run_scheduler_loop_stops_after_max_runs():
     assert summary["ticks"] == 2
     assert calls["count"] == 2
     assert sleeps == [1]
+
+
+def test_run_scheduler_once_passes_default_quality_gate_profile(tmp_path: Path):
+    captured: dict[str, object] = {}
+
+    def fake_run_cycle(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "completed",
+            "checkpoint_path": str(tmp_path / "runs" / "checkpoint.json"),
+        }
+
+    run_scheduler_once(
+        cadence="weekly",
+        state_path=str(tmp_path / "runs" / "scheduler_state.json"),
+        cycle_dir=str(tmp_path / "runs"),
+        simulate_monthly=2500,
+        now=datetime(2026, 2, 27, 9, 0, 0, tzinfo=timezone.utc),
+        run_cycle_fn=fake_run_cycle,
+    )
+
+    assert captured["quality_gate_profile"] == "standard"

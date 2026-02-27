@@ -147,6 +147,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_cycle_parser.add_argument("--simulate-initial", type=float, default=0.0, help="Simulation initial EUR")
     run_cycle_parser.add_argument("--prices-dir", default="data/prices")
     run_cycle_parser.add_argument("--allow-short-history", action="store_true")
+    run_cycle_parser.add_argument(
+        "--quality-gate-profile",
+        choices=["off", "standard", "strict"],
+        default="standard",
+        help="Quality gate profile for report/order artifacts (default: standard)",
+    )
     run_cycle_parser.add_argument("--execute-broker", default="mock")
     run_cycle_parser.add_argument(
         "--execute-submit",
@@ -191,6 +197,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_scheduler_parser.add_argument("--simulation-feedback", default=None)
     run_scheduler_parser.add_argument("--prices-dir", default="data/prices")
     run_scheduler_parser.add_argument("--allow-short-history", action="store_true")
+    run_scheduler_parser.add_argument(
+        "--quality-gate-profile",
+        choices=["off", "standard", "strict"],
+        default="standard",
+        help="Quality gate profile for run-cycle execution (default: standard)",
+    )
     run_scheduler_parser.add_argument("--execute-broker", default="mock")
     run_scheduler_parser.add_argument(
         "--execute-submit",
@@ -445,6 +457,7 @@ def main() -> int:
                 simulation_feedback_path=args.simulation_feedback,
                 prices_dir=args.prices_dir,
                 allow_short_history=args.allow_short_history,
+                quality_gate_profile=args.quality_gate_profile,
                 execute_broker=args.execute_broker,
                 execute_dry_run=(not args.execute_submit),
                 skip_execution=args.skip_execution,
@@ -477,6 +490,7 @@ def main() -> int:
                 "simulation_feedback_path": args.simulation_feedback,
                 "prices_dir": args.prices_dir,
                 "allow_short_history": args.allow_short_history,
+                "quality_gate_profile": args.quality_gate_profile,
                 "execute_broker": args.execute_broker,
                 "execute_dry_run": (not args.execute_submit),
                 "skip_execution": args.skip_execution,

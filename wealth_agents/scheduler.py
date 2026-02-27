@@ -21,6 +21,7 @@ from .orchestration import (
 
 VALID_CADENCES = {"weekly", "monthly"}
 DEFAULT_STATE_PATH = "runs/scheduler_state.json"
+DEFAULT_SCHEDULER_QUALITY_GATE_PROFILE = "standard"
 
 
 def run_scheduler_once(
@@ -46,6 +47,7 @@ def run_scheduler_once(
     execute_dry_run: bool = True,
     skip_execution: bool = False,
     resume: bool = False,
+    quality_gate_profile: str = DEFAULT_SCHEDULER_QUALITY_GATE_PROFILE,
     force: bool = False,
     now: datetime | None = None,
     run_cycle_fn: Callable[..., dict[str, Any]] = run_cycle,
@@ -67,8 +69,7 @@ def run_scheduler_once(
     if not isinstance(last_completed_map, dict):
         last_completed_map = {}
         state["last_completed"] = last_completed_map
-    runs_list = state.get("runs")
-    if not isinstance(runs_list, list):
+    if not isinstance(state.get("runs"), list):
         state["runs"] = []
 
     last_completed = str(last_completed_map.get(cadence_value) or "")
@@ -110,6 +111,7 @@ def run_scheduler_once(
             execute_dry_run=execute_dry_run,
             skip_execution=skip_execution,
             resume=resume,
+            quality_gate_profile=quality_gate_profile,
         )
     except Exception as exc:
         _append_run(
@@ -188,6 +190,7 @@ def run_scheduler_loop(
     execute_dry_run: bool = True,
     skip_execution: bool = False,
     resume: bool = False,
+    quality_gate_profile: str = DEFAULT_SCHEDULER_QUALITY_GATE_PROFILE,
     force: bool = False,
     run_once_fn: Callable[..., dict[str, Any]] = run_scheduler_once,
     sleep_fn: Callable[[float], Any] = time.sleep,
@@ -225,6 +228,7 @@ def run_scheduler_loop(
                 execute_dry_run=execute_dry_run,
                 skip_execution=skip_execution,
                 resume=resume,
+                quality_gate_profile=quality_gate_profile,
                 force=force,
             )
         except Exception as exc:
