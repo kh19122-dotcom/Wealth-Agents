@@ -13,6 +13,7 @@ from .ips import (
     init_ips_files,
 )
 from .orders import propose_monthly_orders
+from .orchestration import run_cycle
 from .portfolio import (
     generate_portfolio_drift_report,
     import_portfolio_trades,
@@ -127,6 +128,32 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional execution result JSON output path",
     )
+
+    run_cycle_parser = sub.add_parser("run-cycle", help="Run Phase 1->4 orchestration cycle with checkpoints")
+    run_cycle_parser.add_argument("--cycle-id", default=None, help="Optional cycle identifier")
+    run_cycle_parser.add_argument("--cycle-dir", default="runs", help="Cycle root directory (default: runs)")
+    run_cycle_parser.add_argument("--week", required=True, help="ISO week format YYYY-Www")
+    run_cycle_parser.add_argument("--month", required=True, help="Order month format YYYY-MM")
+    run_cycle_parser.add_argument("--collect-config", default="config/feeds.yml")
+    run_cycle_parser.add_argument("--rules", default="config/rules.yml")
+    run_cycle_parser.add_argument("--ips-input", default="data/policy/ips_inputs.yml")
+    run_cycle_parser.add_argument("--policy-choice", default="balanced")
+    run_cycle_parser.add_argument("--max-signal-tilt", type=int, default=5)
+    run_cycle_parser.add_argument("--simulation-feedback", default=None)
+    run_cycle_parser.add_argument("--simulate-start", required=True, help="Simulation start month YYYY-MM")
+    run_cycle_parser.add_argument("--simulate-end", required=True, help="Simulation end month YYYY-MM")
+    run_cycle_parser.add_argument("--simulate-monthly", required=True, type=float, help="Simulation monthly EUR")
+    run_cycle_parser.add_argument("--simulate-initial", type=float, default=0.0, help="Simulation initial EUR")
+    run_cycle_parser.add_argument("--prices-dir", default="data/prices")
+    run_cycle_parser.add_argument("--allow-short-history", action="store_true")
+    run_cycle_parser.add_argument("--execute-broker", default="mock")
+    run_cycle_parser.add_argument(
+        "--execute-submit",
+        action="store_true",
+        help="Submit broker orders (default is dry-run execution).",
+    )
+    run_cycle_parser.add_argument("--skip-execution", action="store_true")
+    run_cycle_parser.add_argument("--resume", action="store_true")
 
     fetch_prices = sub.add_parser(
         "fetch-prices",
@@ -333,6 +360,37 @@ def main() -> int:
                 result["dry_run"],
                 result["submitted_count"],
                 result["skipped_count"],
+            )
+            return 0
+
+        if args.command == "run-cycle":
+            result = run_cycle(
+                week=args.week,
+                month=args.month,
+                simulate_start=args.simulate_start,
+                simulate_end=args.simulate_end,
+                simulate_monthly=args.simulate_monthly,
+                simulate_initial=args.simulate_initial,
+                cycle_id=args.cycle_id,
+                cycle_dir=args.cycle_dir,
+                collect_config=args.collect_config,
+                rules_path=args.rules,
+                ips_input_path=args.ips_input,
+                policy_choice=args.policy_choice,
+                max_signal_tilt_pct=args.max_signal_tilt,
+                simulation_feedback_path=args.simulation_feedback,
+                prices_dir=args.prices_dir,
+                allow_short_history=args.allow_short_history,
+                execute_broker=args.execute_broker,
+                execute_dry_run=(not args.execute_submit),
+                skip_execution=args.skip_execution,
+                resume=args.resume,
+            )
+            logging.getLogger(__name__).info(
+                "Run cycle complete: cycle_id=%s status=%s checkpoint=%s",
+                result["cycle_id"],
+                result["status"],
+                result["checkpoint_path"],
             )
             return 0
 
