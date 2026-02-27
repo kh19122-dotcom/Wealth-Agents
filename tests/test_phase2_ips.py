@@ -322,6 +322,101 @@ def test_finalize_policy_carries_signal_overlay_context(tmp_path: Path):
     assert isinstance(overlay.get("drivers"), list)
 
 
+def test_finalize_policy_attaches_default_instruments_for_phase3_continuity(tmp_path: Path):
+    input_path = tmp_path / "data/policy/ips_inputs.yml"
+    _write_inputs(input_path)
+    draft_path, _ = draft_policy(
+        input_path=str(input_path),
+        draft_path=str(tmp_path / "data/policy/policy_draft.yml"),
+        report_dir=str(tmp_path / "reports"),
+    )
+    out_policy, _ = finalize_policy(
+        choice="balanced",
+        draft_path=str(draft_path),
+        policy_path=str(tmp_path / "data/policy/policy.yml"),
+        history_path=str(tmp_path / "data/policy/policy_history.jsonl"),
+    )
+
+    policy_doc = yaml.safe_load(out_policy.read_text(encoding="utf-8"))
+    policy = policy_doc.get("policy") or {}
+    instruments = policy.get("instruments") or {}
+    assert isinstance(instruments, dict) and instruments
+    assert "global_equity" in instruments
+    assert "bonds_cashlike" in instruments
+    assert "optional_gold" in instruments
+    assert policy.get("notes", {}).get("instrument_source") == "default_template"
+
+
+def test_finalize_policy_preserves_existing_instruments_when_overwriting_policy(tmp_path: Path):
+    input_path = tmp_path / "data/policy/ips_inputs.yml"
+    _write_inputs(input_path)
+    draft_path, _ = draft_policy(
+        input_path=str(input_path),
+        draft_path=str(tmp_path / "data/policy/policy_draft.yml"),
+        report_dir=str(tmp_path / "reports"),
+    )
+
+    policy_path = tmp_path / "data/policy/policy.yml"
+    existing_policy = {
+        "policy_version": "2026-02-08",
+        "created_at": "2026-02-08T00:00:00Z",
+        "policy_hash": "existing-hash",
+        "selected_candidate": "balanced",
+        "inputs_snapshot": {"base_currency": "EUR"},
+        "policy": {
+            "target_allocation": [
+                {"bucket": "global_equity", "pct": 60},
+                {"bucket": "bonds_cashlike", "pct": 35},
+                {"bucket": "optional_gold", "pct": 5},
+            ],
+            "instruments": {
+                "global_equity": [
+                    {
+                        "id": "custom_equity",
+                        "isin": "TEST_CUSTOM_EQUITY",
+                        "name": "Custom Equity ETF",
+                        "weight_within_bucket": 1.0,
+                        "data": {"provider": "yahoo", "ticker": "CSTM.EQ"},
+                    }
+                ],
+                "bonds_cashlike": [
+                    {
+                        "id": "custom_bond",
+                        "isin": "TEST_CUSTOM_BOND",
+                        "name": "Custom Bond ETF",
+                        "weight_within_bucket": 1.0,
+                        "data": {"provider": "yahoo", "ticker": "CSTM.BD"},
+                    }
+                ],
+                "optional_gold": [
+                    {
+                        "id": "custom_gold",
+                        "isin": "TEST_CUSTOM_GOLD",
+                        "name": "Custom Gold ETC",
+                        "weight_within_bucket": 1.0,
+                        "data": {"provider": "yahoo", "ticker": "CSTM.AU"},
+                    }
+                ],
+            },
+        },
+    }
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(yaml.safe_dump(existing_policy, sort_keys=False), encoding="utf-8")
+
+    out_policy, _ = finalize_policy(
+        choice="balanced",
+        draft_path=str(draft_path),
+        policy_path=str(policy_path),
+        history_path=str(tmp_path / "data/policy/policy_history.jsonl"),
+    )
+    policy_doc = yaml.safe_load(out_policy.read_text(encoding="utf-8"))
+    instruments = policy_doc.get("policy", {}).get("instruments") or {}
+    assert instruments.get("global_equity", [])[0]["id"] == "custom_equity"
+    assert instruments.get("bonds_cashlike", [])[0]["id"] == "custom_bond"
+    assert instruments.get("optional_gold", [])[0]["id"] == "custom_gold"
+    assert policy_doc.get("policy", {}).get("notes", {}).get("instrument_source") == "existing_policy"
+
+
 def test_ips_draft_caps_tilt_from_simulation_feedback_risk_guardrails(tmp_path: Path):
     input_path = tmp_path / "data/policy/ips_inputs.yml"
     _write_inputs(input_path)
