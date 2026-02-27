@@ -22,6 +22,7 @@ from .portfolio import (
 from .policy_review import apply_review_proposal, review_policy
 from .report import generate_weekly_report
 from .rss import collect_from_feeds_with_stats
+from .scheduler import run_scheduler_loop, run_scheduler_once
 from .simulation import run_simulation
 from .storage import append_unique_records, validate_jsonl
 
@@ -154,6 +155,69 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_cycle_parser.add_argument("--skip-execution", action="store_true")
     run_cycle_parser.add_argument("--resume", action="store_true")
+
+    run_scheduler_parser = sub.add_parser(
+        "run-scheduler",
+        help="Run periodic scheduler that triggers run-cycle with de-dup state",
+    )
+    run_scheduler_parser.add_argument("--cadence", default="weekly", choices=["weekly", "monthly"])
+    run_scheduler_parser.add_argument(
+        "--state-path",
+        default="runs/scheduler_state.json",
+        help="Scheduler state path for de-duplication (default: runs/scheduler_state.json)",
+    )
+    run_scheduler_parser.add_argument("--cycle-dir", default="runs", help="Cycle root directory (default: runs)")
+    run_scheduler_parser.add_argument("--week", default=None, help="Optional fixed ISO week override YYYY-Www")
+    run_scheduler_parser.add_argument("--month", default=None, help="Optional fixed order month override YYYY-MM")
+    run_scheduler_parser.add_argument("--simulate-monthly", required=True, type=float, help="Simulation monthly EUR")
+    run_scheduler_parser.add_argument("--simulate-initial", type=float, default=0.0, help="Simulation initial EUR")
+    run_scheduler_parser.add_argument(
+        "--simulate-lookback-months",
+        type=int,
+        default=14,
+        help="Auto simulation window length in months (default: 14)",
+    )
+    run_scheduler_parser.add_argument(
+        "--simulate-end-offset-months",
+        type=int,
+        default=0,
+        help="Offset simulation end month from anchor month (default: 0)",
+    )
+    run_scheduler_parser.add_argument("--collect-config", default="config/feeds.yml")
+    run_scheduler_parser.add_argument("--rules", default="config/rules.yml")
+    run_scheduler_parser.add_argument("--ips-input", default="data/policy/ips_inputs.yml")
+    run_scheduler_parser.add_argument("--policy-choice", default="balanced")
+    run_scheduler_parser.add_argument("--max-signal-tilt", type=int, default=5)
+    run_scheduler_parser.add_argument("--simulation-feedback", default=None)
+    run_scheduler_parser.add_argument("--prices-dir", default="data/prices")
+    run_scheduler_parser.add_argument("--allow-short-history", action="store_true")
+    run_scheduler_parser.add_argument("--execute-broker", default="mock")
+    run_scheduler_parser.add_argument(
+        "--execute-submit",
+        action="store_true",
+        help="Submit broker orders (default is dry-run execution).",
+    )
+    run_scheduler_parser.add_argument("--skip-execution", action="store_true")
+    run_scheduler_parser.add_argument("--resume", action="store_true")
+    run_scheduler_parser.add_argument("--force", action="store_true")
+    run_scheduler_parser.add_argument("--loop", action="store_true", help="Run continuously until interrupted")
+    run_scheduler_parser.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=300,
+        help="Scheduler loop poll interval in seconds (default: 300)",
+    )
+    run_scheduler_parser.add_argument(
+        "--max-runs",
+        type=int,
+        default=None,
+        help="Optional maximum successful runs before exit in loop mode",
+    )
+    run_scheduler_parser.add_argument(
+        "--stop-on-error",
+        action="store_true",
+        help="Exit loop immediately when a cycle run fails",
+    )
 
     fetch_prices = sub.add_parser(
         "fetch-prices",
@@ -392,6 +456,55 @@ def main() -> int:
                 result["status"],
                 result["checkpoint_path"],
             )
+            return 0
+
+        if args.command == "run-scheduler":
+            common_kwargs = {
+                "cadence": args.cadence,
+                "state_path": args.state_path,
+                "cycle_dir": args.cycle_dir,
+                "week": args.week,
+                "month": args.month,
+                "simulate_monthly": args.simulate_monthly,
+                "simulate_initial": args.simulate_initial,
+                "simulate_lookback_months": args.simulate_lookback_months,
+                "simulate_end_offset_months": args.simulate_end_offset_months,
+                "collect_config": args.collect_config,
+                "rules_path": args.rules,
+                "ips_input_path": args.ips_input,
+                "policy_choice": args.policy_choice,
+                "max_signal_tilt_pct": args.max_signal_tilt,
+                "simulation_feedback_path": args.simulation_feedback,
+                "prices_dir": args.prices_dir,
+                "allow_short_history": args.allow_short_history,
+                "execute_broker": args.execute_broker,
+                "execute_dry_run": (not args.execute_submit),
+                "skip_execution": args.skip_execution,
+                "resume": args.resume,
+                "force": args.force,
+            }
+            if args.loop:
+                summary = run_scheduler_loop(
+                    **common_kwargs,
+                    poll_seconds=args.poll_seconds,
+                    max_runs=args.max_runs,
+                    stop_on_error=args.stop_on_error,
+                )
+                logging.getLogger(__name__).info(
+                    "Scheduler loop complete: ticks=%s successful_runs=%s last_reason=%s",
+                    summary["ticks"],
+                    summary["successful_runs"],
+                    (summary.get("last_result") or {}).get("reason"),
+                )
+            else:
+                result = run_scheduler_once(**common_kwargs)
+                logging.getLogger(__name__).info(
+                    "Scheduler tick: ran=%s cadence=%s period=%s reason=%s",
+                    result["ran"],
+                    result["cadence"],
+                    result["period_key"],
+                    result["reason"],
+                )
             return 0
 
         if args.command == "fetch-prices":
