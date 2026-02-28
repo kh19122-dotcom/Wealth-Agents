@@ -9,6 +9,7 @@ from .execution import execute_order_proposal
 from .fetch_prices import fetch_prices_for_policy
 from .ingest import ingest_manual_inputs
 from .ips import (
+    diversify_policy_instruments,
     draft_policy,
     finalize_policy,
     init_ips_files,
@@ -97,6 +98,29 @@ def build_parser() -> argparse.ArgumentParser:
     ips_finalize.add_argument("--policy-output", default="data/policy/policy.yml")
     ips_finalize.add_argument("--history", default="data/policy/policy_history.jsonl")
 
+    ips_diversify = ips_sub.add_parser(
+        "diversify",
+        help="Create or apply diversified instrument template for current policy",
+    )
+    ips_diversify.add_argument("--policy", default="data/policy/policy.yml", help="Existing policy YAML path")
+    ips_diversify.add_argument(
+        "--output",
+        default=None,
+        help="Output policy YAML path (default: data/policy/policy_diversified.yml when not applying)",
+    )
+    ips_diversify.add_argument("--profile", default="core", choices=["core"])
+    ips_diversify.add_argument("--history", default="data/policy/policy_history.jsonl")
+    ips_diversify.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply diversified instruments directly to --policy path",
+    )
+    ips_diversify.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm policy mutation for --apply",
+    )
+
     propose_orders = sub.add_parser("propose-orders", help="Propose monthly BUY orders from policy")
     propose_orders.add_argument("--month", required=True, help="Month in YYYY-MM format, e.g., 2026-03")
     propose_orders.add_argument("--amount", type=float, default=None, help="Optional budget override in EUR")
@@ -174,6 +198,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scheduler state path for de-duplication (default: runs/scheduler_state.json)",
     )
     run_scheduler_parser.add_argument("--cycle-dir", default="runs", help="Cycle root directory (default: runs)")
+    run_scheduler_parser.add_argument(
+        "--not-before",
+        default=None,
+        help="Do not run cycle before this date (YYYY-MM-DD).",
+    )
     run_scheduler_parser.add_argument("--week", default=None, help="Optional fixed ISO week override YYYY-Www")
     run_scheduler_parser.add_argument("--month", default=None, help="Optional fixed order month override YYYY-MM")
     run_scheduler_parser.add_argument("--simulate-monthly", required=True, type=float, help="Simulation monthly EUR")
@@ -417,6 +446,27 @@ def main() -> int:
                     policy_hash,
                 )
                 return 0
+            if args.ips_command == "diversify":
+                out_policy, policy_hash, summary = diversify_policy_instruments(
+                    policy_path=args.policy,
+                    output_path=args.output,
+                    history_path=args.history,
+                    profile=args.profile,
+                    apply=args.apply,
+                    require_yes=args.apply,
+                    yes=args.yes,
+                )
+                logging.getLogger(__name__).info(
+                    "IPS diversify complete: output=%s policy_hash=%s profile=%s apply=%s "
+                    "instruments_before=%s instruments_after=%s",
+                    out_policy,
+                    policy_hash,
+                    summary.get("profile"),
+                    summary.get("apply"),
+                    summary.get("previous_instrument_count"),
+                    summary.get("new_instrument_count"),
+                )
+                return 0
 
         if args.command == "propose-orders":
             orders_path, report_path, _ = propose_monthly_orders(
@@ -487,6 +537,7 @@ def main() -> int:
                 "cadence": args.cadence,
                 "state_path": args.state_path,
                 "cycle_dir": args.cycle_dir,
+                "not_before": args.not_before,
                 "week": args.week,
                 "month": args.month,
                 "simulate_monthly": args.simulate_monthly,
@@ -526,9 +577,9 @@ def main() -> int:
                 logging.getLogger(__name__).info(
                     "Scheduler tick: ran=%s cadence=%s period=%s reason=%s",
                     result["ran"],
-                    result["cadence"],
-                    result["period_key"],
-                    result["reason"],
+                    result.get("cadence"),
+                    result.get("period_key"),
+                    result.get("reason"),
                 )
             return 0
 

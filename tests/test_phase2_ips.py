@@ -4,7 +4,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from wealth_agents.ips import draft_policy, finalize_policy, init_ips_files
+from wealth_agents.ips import (
+    diversify_policy_instruments,
+    draft_policy,
+    finalize_policy,
+    init_ips_files,
+)
 from wealth_agents.policy import stable_policy_hash, validate_allocation_sum
 
 
@@ -468,3 +473,127 @@ def test_ips_draft_caps_tilt_from_simulation_feedback_risk_guardrails(tmp_path: 
     balanced = draft["candidates"]["balanced"]
     assert _bucket_pct(balanced, "global_equity") == 58
     assert _bucket_pct(balanced, "bonds_cashlike") == 37
+
+
+def test_diversify_policy_instruments_creates_candidate_policy(tmp_path: Path):
+    policy_path = tmp_path / "data/policy/policy.yml"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_doc = {
+        "policy_version": "2026-02-28",
+        "created_at": "2026-02-28T00:00:00Z",
+        "policy_hash": "old-hash",
+        "selected_candidate": "balanced",
+        "inputs_snapshot": {"base_currency": "EUR"},
+        "policy": {
+            "target_allocation": [
+                {"bucket": "global_equity", "pct": 60},
+                {"bucket": "bonds_cashlike", "pct": 35},
+                {"bucket": "optional_gold", "pct": 5},
+            ],
+            "instruments": {
+                "global_equity": [
+                    {
+                        "id": "sp500_acc",
+                        "isin": "IE00B5BMR087",
+                        "name": "S&P500",
+                        "weight_within_bucket": 0.7,
+                        "data": {"provider": "yahoo", "ticker": "CSPX.L"},
+                    },
+                    {
+                        "id": "ex_us_equity",
+                        "isin": "IE000R4ZNTN3",
+                        "name": "Ex-US",
+                        "weight_within_bucket": 0.3,
+                        "data": {"provider": "yahoo", "ticker": "XUSE.AS"},
+                    },
+                ],
+                "bonds_cashlike": [
+                    {
+                        "id": "xeon",
+                        "isin": "LU0290358497",
+                        "name": "XEON",
+                        "weight_within_bucket": 1.0,
+                        "data": {"provider": "yahoo", "ticker": "XEON.DE"},
+                    }
+                ],
+                "optional_gold": [
+                    {
+                        "id": "xetra_gold",
+                        "isin": "DE000A0S9GB0",
+                        "name": "Xetra-Gold",
+                        "weight_within_bucket": 1.0,
+                        "data": {"provider": "yahoo", "ticker": "4GLD.DE"},
+                    }
+                ],
+            },
+            "notes": {"rationale": "test"},
+        },
+    }
+    policy_path.write_text(yaml.safe_dump(policy_doc, sort_keys=False), encoding="utf-8")
+
+    out_policy, policy_hash, summary = diversify_policy_instruments(
+        policy_path=str(policy_path),
+        output_path=str(tmp_path / "data/policy/policy_diversified.yml"),
+        profile="core",
+        apply=False,
+    )
+
+    assert out_policy.exists()
+    assert summary["profile"] == "core"
+    assert summary["apply"] is False
+    assert summary["new_instrument_count"] == 7
+
+    diversified_doc = yaml.safe_load(out_policy.read_text(encoding="utf-8"))
+    assert diversified_doc["policy_hash"] == policy_hash
+    notes = diversified_doc["policy"]["notes"]
+    assert notes["instrument_source"] == "diversified_template:core"
+    assert notes["diversification_profile"] == "core"
+    instruments = diversified_doc["policy"]["instruments"]
+    assert len(instruments["global_equity"]) == 4
+    assert len(instruments["bonds_cashlike"]) == 2
+    assert len(instruments["optional_gold"]) == 1
+
+
+def test_diversify_policy_instruments_apply_requires_yes(tmp_path: Path):
+    policy_path = tmp_path / "data/policy/policy.yml"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(
+        yaml.safe_dump(
+            {
+                "policy_version": "2026-02-28",
+                "created_at": "2026-02-28T00:00:00Z",
+                "policy_hash": "old-hash",
+                "selected_candidate": "balanced",
+                "inputs_snapshot": {"base_currency": "EUR"},
+                "policy": {
+                    "target_allocation": [
+                        {"bucket": "global_equity", "pct": 60},
+                        {"bucket": "bonds_cashlike", "pct": 35},
+                        {"bucket": "optional_gold", "pct": 5},
+                    ],
+                    "instruments": {
+                        "global_equity": [
+                            {"id": "a", "isin": "A", "name": "A", "weight_within_bucket": 1.0}
+                        ],
+                        "bonds_cashlike": [
+                            {"id": "b", "isin": "B", "name": "B", "weight_within_bucket": 1.0}
+                        ],
+                        "optional_gold": [
+                            {"id": "c", "isin": "C", "name": "C", "weight_within_bucket": 1.0}
+                        ],
+                    },
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="--yes"):
+        diversify_policy_instruments(
+            policy_path=str(policy_path),
+            profile="core",
+            apply=True,
+            require_yes=True,
+            yes=False,
+        )

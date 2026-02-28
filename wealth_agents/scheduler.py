@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 import time
 from typing import Any, Callable
 
-from .market_prices import parse_iso_month
+from .market_prices import parse_iso_date, parse_iso_month
 from .orchestration import (
     DEFAULT_COLLECT_CONFIG,
     DEFAULT_CYCLE_DIR,
@@ -29,6 +29,7 @@ def run_scheduler_once(
     cadence: str = "weekly",
     state_path: str = DEFAULT_STATE_PATH,
     cycle_dir: str = DEFAULT_CYCLE_DIR,
+    not_before: str | None = None,
     week: str | None = None,
     month: str | None = None,
     simulate_monthly: float,
@@ -59,6 +60,20 @@ def run_scheduler_once(
         raise ValueError("simulate_lookback_months must be >= 1.")
 
     current_now = _as_utc(now)
+    not_before_date = _validate_iso_date(not_before, "not_before") if not_before else None
+    if not_before_date is not None and current_now.date() < not_before_date:
+        state_file = Path(state_path)
+        state = _load_state(state_file)
+        state["updated_at"] = _now_iso8601(current_now)
+        _save_state(state_file, state)
+        return {
+            "ran": False,
+            "reason": "before_not_before_date",
+            "cadence": cadence_value,
+            "not_before": not_before_date.isoformat(),
+            "today": current_now.date().isoformat(),
+        }
+
     effective_week = _validate_iso_week(week) if week else _iso_week(current_now)
     effective_month = _validate_iso_month(month) if month else current_now.strftime("%Y-%m")
     period_key = effective_week if cadence_value == "weekly" else effective_month
@@ -169,6 +184,7 @@ def run_scheduler_loop(
     cadence: str = "weekly",
     state_path: str = DEFAULT_STATE_PATH,
     cycle_dir: str = DEFAULT_CYCLE_DIR,
+    not_before: str | None = None,
     poll_seconds: int = 300,
     max_runs: int | None = None,
     stop_on_error: bool = False,
@@ -210,6 +226,7 @@ def run_scheduler_loop(
                 cadence=cadence,
                 state_path=state_path,
                 cycle_dir=cycle_dir,
+                not_before=not_before,
                 week=week,
                 month=month,
                 simulate_monthly=simulate_monthly,
@@ -324,6 +341,12 @@ def _validate_iso_month(value: str | None) -> str:
         raise ValueError("month must be in YYYY-MM format.")
     parsed = parse_iso_month(value, "month")
     return parsed.strftime("%Y-%m")
+
+
+def _validate_iso_date(value: str | None, field_name: str) -> date:
+    if value is None:
+        raise ValueError(f"{field_name} must be in YYYY-MM-DD format.")
+    return parse_iso_date(value, field_name)
 
 
 def _validate_iso_week(value: str | None) -> str:

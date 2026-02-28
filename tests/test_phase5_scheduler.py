@@ -157,3 +157,27 @@ def test_run_scheduler_once_passes_default_quality_gate_profile(tmp_path: Path):
     )
 
     assert captured["quality_gate_profile"] == "standard"
+
+
+def test_run_scheduler_once_respects_not_before_date(tmp_path: Path):
+    called = {"count": 0}
+
+    def fake_run_cycle(**kwargs):
+        called["count"] += 1
+        return {"status": "completed", "checkpoint_path": ""}
+
+    result = run_scheduler_once(
+        cadence="weekly",
+        state_path=str(tmp_path / "runs" / "scheduler_state.json"),
+        cycle_dir=str(tmp_path / "runs"),
+        not_before="2026-03-10",
+        simulate_monthly=2500,
+        now=datetime(2026, 3, 1, 8, 0, 0, tzinfo=timezone.utc),
+        run_cycle_fn=fake_run_cycle,
+    )
+
+    assert result["ran"] is False
+    assert result["reason"] == "before_not_before_date"
+    assert result["not_before"] == "2026-03-10"
+    assert result["today"] == "2026-03-01"
+    assert called["count"] == 0

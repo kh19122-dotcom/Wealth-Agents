@@ -25,14 +25,95 @@ DEFAULT_QUESTIONS_PATH = "reports/ips_questions.md"
 DEFAULT_REPORT_DIR = "reports"
 DEFAULT_WEEKLY_AGGREGATES_PATH = "data/meta/weekly_aggregates.jsonl"
 DEFAULT_SIGNAL_MAX_TILT_PCT = 5
+DEFAULT_DIVERSIFICATION_PROFILE = "core"
 ISO_WEEK_PATTERN = re.compile(r"^\d{4}-W\d{2}$")
+DIVERSIFIED_INSTRUMENT_TEMPLATES: dict[str, dict[str, list[dict[str, Any]]]] = {
+    "core": {
+        "global_equity": [
+            {
+                "id": "sp500_acc",
+                "isin": "IE00B5BMR087",
+                "name": "iShares Core S&P 500 UCITS ETF (Acc)",
+                "weight_within_bucket": 0.40,
+                "data": {
+                    "provider": "yahoo",
+                    "ticker": "CSPX.L",
+                },
+            },
+            {
+                "id": "ex_us_equity",
+                "isin": "IE000R4ZNTN3",
+                "name": "iShares MSCI World ex-USA UCITS ETF USD (Acc)",
+                "weight_within_bucket": 0.25,
+                "data": {
+                    "provider": "yahoo",
+                    "ticker": "XUSE.AS",
+                },
+            },
+            {
+                "id": "em_equity",
+                "isin": "IE00BKM4GZ66",
+                "name": "iShares Core MSCI EM IMI UCITS ETF (Acc)",
+                "weight_within_bucket": 0.20,
+                "data": {
+                    "provider": "yahoo",
+                    "ticker": "EIMI.L",
+                },
+            },
+            {
+                "id": "world_small_cap",
+                "isin": "IE00BF4RFH31",
+                "name": "iShares MSCI World Small Cap UCITS ETF",
+                "weight_within_bucket": 0.15,
+                "data": {
+                    "provider": "yahoo",
+                    "ticker": "WSML.L",
+                },
+            },
+        ],
+        "bonds_cashlike": [
+            {
+                "id": "xeon",
+                "isin": "LU0290358497",
+                "name": "Xtrackers II EUR Overnight Rate Swap UCITS ETF (XEON)",
+                "weight_within_bucket": 0.60,
+                "data": {
+                    "provider": "yahoo",
+                    "ticker": "XEON.DE",
+                },
+            },
+            {
+                "id": "global_agg_bond_hedged",
+                "isin": "IE00BDBRDM35",
+                "name": "iShares Core Global Aggregate Bond UCITS ETF EUR Hedged (Acc)",
+                "weight_within_bucket": 0.40,
+                "data": {
+                    "provider": "yahoo",
+                    "ticker": "AGGH.L",
+                },
+            },
+        ],
+        "optional_gold": [
+            {
+                "id": "xetra_gold",
+                "isin": "DE000A0S9GB0",
+                "name": "Xetra-Gold",
+                "weight_within_bucket": 1.0,
+                "data": {
+                    "provider": "yahoo",
+                    "ticker": "4GLD.DE",
+                },
+            }
+        ],
+    }
+}
 DEFAULT_POLICY_INSTRUMENTS: dict[str, list[dict[str, Any]]] = {
     "global_equity": [
         {
             "id": "sp500_acc",
             "isin": "IE00B5BMR087",
             "name": "iShares Core S&P 500 UCITS ETF (Acc)",
-            "weight_within_bucket": 0.70,
+            "weight_within_bucket": 0.40,
             "data": {
                 "provider": "yahoo",
                 "ticker": "CSPX.L",
@@ -42,10 +123,30 @@ DEFAULT_POLICY_INSTRUMENTS: dict[str, list[dict[str, Any]]] = {
             "id": "ex_us_equity",
             "isin": "IE000R4ZNTN3",
             "name": "iShares MSCI World ex-USA UCITS ETF USD (Acc)",
-            "weight_within_bucket": 0.30,
+            "weight_within_bucket": 0.25,
             "data": {
                 "provider": "yahoo",
                 "ticker": "XUSE.AS",
+            },
+        },
+        {
+            "id": "em_equity",
+            "isin": "IE00BKM4GZ66",
+            "name": "iShares Core MSCI EM IMI UCITS ETF (Acc)",
+            "weight_within_bucket": 0.20,
+            "data": {
+                "provider": "yahoo",
+                "ticker": "EIMI.L",
+            },
+        },
+        {
+            "id": "world_small_cap",
+            "isin": "IE00BF4RFH31",
+            "name": "iShares MSCI World Small Cap UCITS ETF",
+            "weight_within_bucket": 0.15,
+            "data": {
+                "provider": "yahoo",
+                "ticker": "WSML.L",
             },
         },
     ],
@@ -54,12 +155,22 @@ DEFAULT_POLICY_INSTRUMENTS: dict[str, list[dict[str, Any]]] = {
             "id": "xeon",
             "isin": "LU0290358497",
             "name": "Xtrackers II EUR Overnight Rate Swap UCITS ETF (XEON)",
-            "weight_within_bucket": 1.0,
+            "weight_within_bucket": 0.60,
             "data": {
                 "provider": "yahoo",
                 "ticker": "XEON.DE",
             },
-        }
+        },
+        {
+            "id": "global_agg_bond_hedged",
+            "isin": "IE00BDBRDM35",
+            "name": "iShares Core Global Aggregate Bond UCITS ETF EUR Hedged (Acc)",
+            "weight_within_bucket": 0.40,
+            "data": {
+                "provider": "yahoo",
+                "ticker": "AGGH.L",
+            },
+        },
     ],
     "optional_gold": [
         {
@@ -303,6 +414,167 @@ def finalize_policy(
         },
     )
     return out_policy, policy_hash
+
+
+def diversify_policy_instruments(
+    policy_path: str = DEFAULT_POLICY_PATH,
+    output_path: str | None = None,
+    history_path: str = DEFAULT_HISTORY_PATH,
+    profile: str = DEFAULT_DIVERSIFICATION_PROFILE,
+    apply: bool = False,
+    require_yes: bool = False,
+    yes: bool = False,
+) -> tuple[Path, str, dict[str, Any]]:
+    if apply and require_yes and not yes:
+        raise ValueError("Refusing to mutate policy without confirmation. Re-run with --yes.")
+
+    normalized_profile = str(profile or DEFAULT_DIVERSIFICATION_PROFILE).strip().lower()
+    template = DIVERSIFIED_INSTRUMENT_TEMPLATES.get(normalized_profile)
+    if not isinstance(template, dict) or not template:
+        raise ValueError(
+            f"profile must be one of: {', '.join(sorted(DIVERSIFIED_INSTRUMENT_TEMPLATES.keys()))}"
+        )
+
+    policy_doc = read_yaml(policy_path)
+    policy = policy_doc.get("policy")
+    if not isinstance(policy, dict):
+        raise ValueError(f"Missing root 'policy' object in {policy_path}.")
+
+    diversified = _build_diversified_instruments_for_policy(policy=policy, template=template)
+    previous_count = _instrument_count(policy.get("instruments"))
+    diversified_count = _instrument_count(diversified)
+    policy["instruments"] = diversified
+
+    notes = policy.get("notes")
+    if not isinstance(notes, dict):
+        notes = {"rationale": str(notes or "")}
+        policy["notes"] = notes
+    notes["instrument_source"] = f"diversified_template:{normalized_profile}"
+    notes["diversification_profile"] = normalized_profile
+    notes["diversification_note"] = (
+        "Instrument universe diversified with a template. "
+        "Run fetch-prices/simulate before enabling live execution."
+    )
+
+    hash_basis = {
+        "selected_candidate": policy_doc.get("selected_candidate"),
+        "inputs_snapshot": policy_doc.get("inputs_snapshot"),
+        "policy": policy,
+    }
+    policy_hash = stable_policy_hash(hash_basis)
+    policy_doc["policy_hash"] = policy_hash
+    policy_doc["updated_at"] = _now_iso8601()
+
+    if apply:
+        destination = Path(policy_path)
+    else:
+        destination = Path(output_path) if output_path else Path(policy_path).with_name("policy_diversified.yml")
+
+    out_policy = write_yaml(str(destination), policy_doc)
+
+    if apply:
+        append_policy_history(
+            history_path,
+            {
+                "event": "diversify_policy_instruments",
+                "created_at": _now_iso8601(),
+                "policy_hash": policy_hash,
+                "policy_path": str(out_policy),
+                "profile": normalized_profile,
+                "previous_instrument_count": previous_count,
+                "new_instrument_count": diversified_count,
+            },
+        )
+
+    summary = {
+        "profile": normalized_profile,
+        "apply": bool(apply),
+        "previous_instrument_count": previous_count,
+        "new_instrument_count": diversified_count,
+        "target_buckets": sorted(diversified.keys()),
+    }
+    return out_policy, policy_hash, summary
+
+
+def _build_diversified_instruments_for_policy(
+    *,
+    policy: dict[str, Any],
+    template: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    target_allocation = policy.get("target_allocation")
+    if not isinstance(target_allocation, list) or not target_allocation:
+        raise ValueError("policy.target_allocation must be a non-empty list.")
+    existing = policy.get("instruments")
+    existing_map = existing if isinstance(existing, dict) else {}
+
+    required_buckets: list[str] = []
+    for row in target_allocation:
+        if not isinstance(row, dict):
+            continue
+        bucket = str(row.get("bucket") or "").strip()
+        if not bucket:
+            continue
+        try:
+            pct = float(row.get("pct") or 0.0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        if pct > 0:
+            required_buckets.append(bucket)
+
+    out: dict[str, list[dict[str, Any]]] = {}
+    missing: list[str] = []
+    for bucket in required_buckets:
+        if bucket in template:
+            out[bucket] = to_jsonable_copy(template[bucket])
+            continue
+        existing_rows = existing_map.get(bucket)
+        if isinstance(existing_rows, list) and existing_rows:
+            out[bucket] = to_jsonable_copy(existing_rows)
+            continue
+        missing.append(bucket)
+
+    if missing:
+        missing_list = ", ".join(sorted(set(missing)))
+        raise ValueError(
+            "Missing instrument mappings for target buckets after diversification: "
+            f"{missing_list}"
+        )
+
+    _validate_instrument_weights(out)
+    return out
+
+
+def _validate_instrument_weights(instruments: dict[str, list[dict[str, Any]]]) -> None:
+    for bucket, rows in instruments.items():
+        if not isinstance(rows, list) or not rows:
+            raise ValueError(f"Bucket '{bucket}' must contain at least one instrument.")
+        total = 0.0
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError(f"Bucket '{bucket}' contains an invalid instrument row.")
+            try:
+                weight = float(row.get("weight_within_bucket"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Bucket '{bucket}' has non-numeric weight_within_bucket."
+                ) from exc
+            if weight <= 0:
+                raise ValueError(f"Bucket '{bucket}' has non-positive weight_within_bucket.")
+            total += weight
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                f"Bucket '{bucket}' weight_within_bucket must sum to 1.0, found {total:.6f}."
+            )
+
+
+def _instrument_count(raw: Any) -> int:
+    if not isinstance(raw, dict):
+        return 0
+    count = 0
+    for rows in raw.values():
+        if isinstance(rows, list):
+            count += sum(1 for row in rows if isinstance(row, dict))
+    return count
 
 
 def _default_inputs() -> dict[str, Any]:
