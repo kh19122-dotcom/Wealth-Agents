@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -289,3 +289,108 @@ def test_fetch_prices_prefer_ibkr_without_mapping_can_fallback(monkeypatch: pyte
     row = summary["tickers"][0]
     assert row["source_used"] == "yahoo"
     assert row["sources_attempted"] == ["ibkr", "yahoo"]
+
+
+def test_fetch_prices_strict_quality_gate_can_trigger_yahoo_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    policy_path = tmp_path / "data/policy/policy.yml"
+    contracts_path = tmp_path / "config/ibkr_contracts.yml"
+    _write_policy(policy_path, ["AAA.DE"])
+    _write_ibkr_contracts(contracts_path, ["AAA.DE"])
+
+    start_dt = date(2025, 1, 1)
+    ibkr_series = {start_dt + timedelta(days=i): 120.0 for i in range(7)}
+    yahoo_series = {start_dt + timedelta(days=i): 100.0 for i in range(7)}
+
+    def fake_ibkr(cache_path: Path, ticker: str, contract_spec, start, end, **kwargs):
+        return {
+            "ticker": ticker,
+            "rows_total": len(ibkr_series),
+            "rows_appended": len(ibkr_series),
+            "downloaded_rows": len(ibkr_series),
+            "series": ibkr_series,
+            "cache_path": str(cache_path),
+        }
+
+    def fake_yahoo_sync(cache_path: Path, ticker: str, start, end, max_retries: int = 3):
+        return {
+            "ticker": ticker,
+            "rows_total": 3,
+            "rows_appended": 3,
+            "downloaded_rows": 3,
+            "series": yahoo_series,
+            "cache_path": str(cache_path),
+        }
+
+    def fake_yahoo_reference(ticker: str, start, end, max_retries: int = 2):
+        return yahoo_series
+
+    monkeypatch.setattr("wealth_agents.fetch_prices.sync_ibkr_price_cache", fake_ibkr)
+    monkeypatch.setattr("wealth_agents.fetch_prices.sync_yahoo_price_cache", fake_yahoo_sync)
+    monkeypatch.setattr("wealth_agents.fetch_prices.fetch_yahoo_adj_close", fake_yahoo_reference)
+
+    summary = fetch_prices_for_policy(
+        start="2025-01-01",
+        end="2025-01-31",
+        policy_path=str(policy_path),
+        prices_dir=str(tmp_path / "data/prices"),
+        prefer_source="ibkr",
+        ibkr_contracts_path=str(contracts_path),
+        price_quality_gate_profile="strict",
+    )
+
+    row = summary["tickers"][0]
+    assert row["source_used"] == "yahoo"
+    assert row["sources_attempted"] == ["ibkr", "yahoo"]
+    assert row["fallback_used"] is True
+    assert summary["price_quality_gate_evaluated"] == 1
+    assert summary["price_quality_gate_failed"] == 1
+
+
+def test_fetch_prices_standard_quality_gate_records_failure_without_blocking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    policy_path = tmp_path / "data/policy/policy.yml"
+    contracts_path = tmp_path / "config/ibkr_contracts.yml"
+    _write_policy(policy_path, ["AAA.DE"])
+    _write_ibkr_contracts(contracts_path, ["AAA.DE"])
+
+    start_dt = date(2025, 1, 1)
+    ibkr_series = {start_dt + timedelta(days=i): 120.0 for i in range(7)}
+    yahoo_series = {start_dt + timedelta(days=i): 100.0 for i in range(7)}
+
+    def fake_ibkr(cache_path: Path, ticker: str, contract_spec, start, end, **kwargs):
+        return {
+            "ticker": ticker,
+            "rows_total": len(ibkr_series),
+            "rows_appended": len(ibkr_series),
+            "downloaded_rows": len(ibkr_series),
+            "series": ibkr_series,
+            "cache_path": str(cache_path),
+        }
+
+    def fake_yahoo_reference(ticker: str, start, end, max_retries: int = 2):
+        return yahoo_series
+
+    monkeypatch.setattr("wealth_agents.fetch_prices.sync_ibkr_price_cache", fake_ibkr)
+    monkeypatch.setattr("wealth_agents.fetch_prices.fetch_yahoo_adj_close", fake_yahoo_reference)
+
+    summary = fetch_prices_for_policy(
+        start="2025-01-01",
+        end="2025-01-31",
+        policy_path=str(policy_path),
+        prices_dir=str(tmp_path / "data/prices"),
+        prefer_source="ibkr",
+        ibkr_contracts_path=str(contracts_path),
+        price_quality_gate_profile="standard",
+    )
+
+    row = summary["tickers"][0]
+    gate = row["price_quality_gate"]
+    assert row["source_used"] == "ibkr"
+    assert gate["profile"] == "standard"
+    assert gate["available"] is True
+    assert gate["passed"] is False
+    assert summary["price_quality_gate_evaluated"] == 1
+    assert summary["price_quality_gate_failed"] == 1

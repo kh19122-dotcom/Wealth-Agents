@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .market_prices import (
+    fetch_yahoo_adj_close,
     parse_iso_date,
     read_price_cache,
     sync_ibkr_price_cache,
@@ -18,6 +19,17 @@ DEFAULT_POLICY_PATH = "data/policy/policy.yml"
 DEFAULT_PRICES_DIR = "data/prices"
 SUPPORTED_POLICY_PROVIDER = "yahoo"
 SUPPORTED_SOURCES = {"yahoo", "ibkr", "auto"}
+PRICE_QUALITY_GATE_PROFILES: dict[str, dict[str, float | int]] = {
+    "off": {},
+    "standard": {
+        "max_abs_pct_diff_pct": 5.0,
+        "min_overlap_days": 3,
+    },
+    "strict": {
+        "max_abs_pct_diff_pct": 2.0,
+        "min_overlap_days": 5,
+    },
+}
 LOG = logging.getLogger(__name__)
 
 
@@ -35,6 +47,7 @@ def fetch_prices_for_policy(
     ibkr_timeout_sec: float = 8.0,
     ibkr_max_retries: int = 2,
     allow_source_fallback: bool = True,
+    price_quality_gate_profile: str = "off",
 ) -> dict[str, Any]:
     start_date = parse_iso_date(start, "start")
     end_date = parse_iso_date(end, "end")
@@ -49,7 +62,8 @@ def fetch_prices_for_policy(
     if preferred_source not in SUPPORTED_SOURCES:
         raise ValueError("prefer_source must be one of: yahoo, ibkr, auto.")
     source_order = _resolve_source_order(preferred_source, allow_source_fallback=allow_source_fallback)
-    ibkr_contracts = _load_ibkr_contract_specs(ibkr_contracts_path) if "ibkr" in source_order else {}
+    ibkr_contracts = load_ibkr_contract_specs(ibkr_contracts_path) if "ibkr" in source_order else {}
+    gate_profile = _normalize_price_quality_gate_profile(price_quality_gate_profile)
 
     _, _, instruments = load_policy_and_instruments(policy_path)
     selected = sorted(
@@ -66,6 +80,9 @@ def fetch_prices_for_policy(
     tickers_skipped_empty = 0
     tickers_failed = 0
     tickers_with_existing_cache = 0
+    price_quality_gate_evaluated = 0
+    price_quality_gate_passed = 0
+    price_quality_gate_failed = 0
 
     for instrument in selected:
         cache_path = provider_dir / f"{instrument.ticker}.csv"
@@ -104,6 +121,7 @@ def fetch_prices_for_policy(
         saw_empty_error = False
         synced: dict[str, Any] | None = None
         source_used: str | None = None
+        price_quality_gate: dict[str, Any] | None = None
 
         for source_name in source_order:
             source_attempts.append(source_name)
@@ -121,6 +139,34 @@ def fetch_prices_for_policy(
                     ibkr_timeout_sec=ibkr_timeout_sec,
                     ibkr_max_retries=ibkr_max_retries,
                 )
+                source_used = source_name
+                if source_name == "ibkr":
+                    price_quality_gate = _evaluate_ibkr_price_quality_gate(
+                        profile=gate_profile,
+                        ticker=instrument.ticker,
+                        start=start_date,
+                        end=end_date,
+                        ibkr_series=synced.get("series"),
+                    )
+                    if bool(price_quality_gate.get("available")):
+                        price_quality_gate_evaluated += 1
+                        if bool(price_quality_gate.get("passed")):
+                            price_quality_gate_passed += 1
+                        else:
+                            price_quality_gate_failed += 1
+                    if gate_profile == "strict" and not bool(price_quality_gate.get("passed")):
+                        detail = str(price_quality_gate.get("reason") or "unknown")
+                        raise RuntimeError(
+                            f"IBKR price quality gate failed for ticker '{instrument.ticker}': {detail}"
+                        )
+                else:
+                    price_quality_gate = {
+                        "profile": gate_profile,
+                        "available": False,
+                        "passed": None,
+                        "reason": "quality gate not evaluated for non-IBKR source",
+                        "metrics": {},
+                    }
                 source_used = source_name
                 break
             except RuntimeError as exc:
@@ -161,6 +207,7 @@ def fetch_prices_for_policy(
                     "source_used": source_used,
                     "sources_attempted": source_attempts,
                     "fallback_used": len(source_attempts) > 1 and source_used != source_attempts[0],
+                    "price_quality_gate": price_quality_gate,
                 }
             )
             continue
@@ -186,6 +233,7 @@ def fetch_prices_for_policy(
                     "source_used": None,
                     "sources_attempted": source_attempts,
                     "fallback_used": False,
+                    "price_quality_gate": price_quality_gate,
                 }
             )
             continue
@@ -212,6 +260,7 @@ def fetch_prices_for_policy(
                 "sources_attempted": source_attempts,
                 "fallback_used": False,
                 "error": error_message,
+                "price_quality_gate": price_quality_gate,
             }
         )
         continue
@@ -229,6 +278,10 @@ def fetch_prices_for_policy(
         "provider": provider_name,
         "preferred_source": preferred_source,
         "source_order": source_order,
+        "price_quality_gate_profile": gate_profile,
+        "price_quality_gate_evaluated": price_quality_gate_evaluated,
+        "price_quality_gate_passed": price_quality_gate_passed,
+        "price_quality_gate_failed": price_quality_gate_failed,
         "start": start_date.isoformat(),
         "end": end_date.isoformat(),
         "tickers_count": len(ticker_summaries),
@@ -250,6 +303,15 @@ def _resolve_source_order(preferred_source: str, allow_source_fallback: bool) ->
             return ["ibkr", "yahoo"]
         return ["ibkr"]
     raise ValueError("prefer_source must be one of: yahoo, ibkr, auto.")
+
+
+def _normalize_price_quality_gate_profile(profile: str) -> str:
+    normalized = str(profile or "").strip().lower() or "off"
+    if normalized not in PRICE_QUALITY_GATE_PROFILES:
+        raise ValueError(
+            "price_quality_gate_profile must be one of: off, standard, strict."
+        )
+    return normalized
 
 
 def _sync_price_cache_from_source(
@@ -297,7 +359,7 @@ def _sync_price_cache_from_source(
     raise ValueError(f"Unsupported source_name '{source_name}'.")
 
 
-def _load_ibkr_contract_specs(path: str | None) -> dict[str, dict[str, Any]]:
+def load_ibkr_contract_specs(path: str | None) -> dict[str, dict[str, Any]]:
     if not path:
         return {}
 
@@ -342,3 +404,117 @@ def _is_empty_download_error(exc: Exception) -> bool:
         or "empty ibkr price data" in text
         or "no ibkr adjusted-close data was retrieved" in text
     )
+
+
+def _evaluate_ibkr_price_quality_gate(
+    *,
+    profile: str,
+    ticker: str,
+    start,
+    end,
+    ibkr_series: Any,
+) -> dict[str, Any]:
+    normalized_profile = _normalize_price_quality_gate_profile(profile)
+    if normalized_profile == "off":
+        return {
+            "profile": normalized_profile,
+            "available": False,
+            "passed": None,
+            "reason": "quality gate disabled",
+            "metrics": {},
+        }
+
+    if not isinstance(ibkr_series, dict):
+        return {
+            "profile": normalized_profile,
+            "available": False,
+            "passed": False,
+            "reason": "ibkr series is unavailable for quality comparison",
+            "metrics": {},
+        }
+
+    try:
+        yahoo_series = fetch_yahoo_adj_close(
+            ticker=ticker,
+            start=start,
+            end=end,
+            max_retries=2,
+        )
+    except Exception as exc:
+        return {
+            "profile": normalized_profile,
+            "available": False,
+            "passed": False,
+            "reason": f"unable to fetch yahoo reference: {exc}",
+            "metrics": {},
+        }
+
+    overlap = sorted(set(ibkr_series.keys()) & set(yahoo_series.keys()))
+    thresholds = PRICE_QUALITY_GATE_PROFILES[normalized_profile]
+    min_overlap = int(thresholds["min_overlap_days"])
+    max_abs_pct_diff_limit = float(thresholds["max_abs_pct_diff_pct"])
+    if len(overlap) < min_overlap:
+        return {
+            "profile": normalized_profile,
+            "available": True,
+            "passed": False,
+            "reason": (
+                f"insufficient overlap days for comparison: overlap={len(overlap)} min_required={min_overlap}"
+            ),
+            "metrics": {
+                "overlap_days": len(overlap),
+                "min_overlap_days_required": min_overlap,
+                "max_abs_pct_diff_pct_limit": max_abs_pct_diff_limit,
+            },
+        }
+
+    diffs: list[float] = []
+    for dt in overlap:
+        yv = float(yahoo_series[dt])
+        iv = float(ibkr_series[dt])
+        if yv <= 0:
+            continue
+        diffs.append(abs((iv - yv) / yv) * 100.0)
+
+    if not diffs:
+        return {
+            "profile": normalized_profile,
+            "available": True,
+            "passed": False,
+            "reason": "no comparable positive yahoo price points in overlap window",
+            "metrics": {
+                "overlap_days": len(overlap),
+                "min_overlap_days_required": min_overlap,
+                "max_abs_pct_diff_pct_limit": max_abs_pct_diff_limit,
+            },
+        }
+
+    max_abs_pct_diff = max(diffs)
+    sorted_diffs = sorted(diffs)
+    mid = len(sorted_diffs) // 2
+    if len(sorted_diffs) % 2 == 1:
+        median_abs_pct_diff = sorted_diffs[mid]
+    else:
+        median_abs_pct_diff = (sorted_diffs[mid - 1] + sorted_diffs[mid]) / 2.0
+
+    passed = max_abs_pct_diff <= max_abs_pct_diff_limit
+    if passed:
+        reason = "within configured divergence threshold"
+    else:
+        reason = (
+            f"max_abs_pct_diff_pct={max_abs_pct_diff:.4f} exceeds limit={max_abs_pct_diff_limit:.4f}"
+        )
+    return {
+        "profile": normalized_profile,
+        "available": True,
+        "passed": passed,
+        "reason": reason,
+        "metrics": {
+            "overlap_days": len(overlap),
+            "comparable_points": len(diffs),
+            "max_abs_pct_diff_pct": round(max_abs_pct_diff, 6),
+            "median_abs_pct_diff_pct": round(median_abs_pct_diff, 6),
+            "max_abs_pct_diff_pct_limit": max_abs_pct_diff_limit,
+            "min_overlap_days_required": min_overlap,
+        },
+    }
