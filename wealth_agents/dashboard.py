@@ -10,6 +10,7 @@ from typing import Any
 DEFAULT_RUNS_DIR = "runs"
 DEFAULT_STATE_PATH = "runs/scheduler_state.json"
 DEFAULT_OUTPUT_PATH = "runs/dashboard.html"
+DEFAULT_PREFLIGHT_DIR = "reports"
 DEFAULT_LIMIT = 20
 DEFAULT_TITLE = "Wealth Agents Dashboard"
 
@@ -19,6 +20,7 @@ def build_dashboard(
     runs_dir: str = DEFAULT_RUNS_DIR,
     state_path: str = DEFAULT_STATE_PATH,
     output_path: str = DEFAULT_OUTPUT_PATH,
+    preflight_dir: str | None = DEFAULT_PREFLIGHT_DIR,
     limit: int = DEFAULT_LIMIT,
     title: str = DEFAULT_TITLE,
 ) -> Path:
@@ -31,6 +33,10 @@ def build_dashboard(
 
     cycles = _load_cycle_rows(runs_root, limit=limit)
     scheduler_state = _load_scheduler_state(state_file)
+    preflight_state = _load_latest_preflight_summary(
+        preflight_dir=(Path(preflight_dir) if preflight_dir else None),
+        runs_root=runs_root,
+    )
 
     html = _render_dashboard(
         title=title,
@@ -39,6 +45,7 @@ def build_dashboard(
         state_file=state_file,
         cycles=cycles,
         scheduler_state=scheduler_state,
+        preflight_state=preflight_state,
         limit=limit,
     )
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -78,6 +85,10 @@ def _normalize_cycle_row(*, payload: dict[str, Any], checkpoint_path: Path) -> d
 
     report_gate = _quality_gate_summary(artifact_map.get("report_quality_gate"))
     orders_gate = _quality_gate_summary(artifact_map.get("orders_quality_gate"))
+    execution_guardrail = _execution_guardrail_summary(
+        steps=steps if isinstance(steps, dict) else {},
+        checkpoint_path=checkpoint_path,
+    )
     error_obj = payload.get("error")
     if isinstance(error_obj, dict):
         error_text = str(error_obj.get("message") or "")
@@ -98,6 +109,7 @@ def _normalize_cycle_row(*, payload: dict[str, Any], checkpoint_path: Path) -> d
         "simulation_path": str(artifact_map.get("simulation_path") or ""),
         "report_gate": report_gate,
         "orders_gate": orders_gate,
+        "execution_guardrail": execution_guardrail,
         "error": error_text,
     }
 
@@ -138,6 +150,69 @@ def _quality_gate_summary(raw: Any) -> dict[str, Any]:
     }
 
 
+def _execution_guardrail_summary(*, steps: dict[str, Any], checkpoint_path: Path) -> dict[str, Any]:
+    step_row = steps.get("execute_orders")
+    if not isinstance(step_row, dict):
+        return {
+            "available": False,
+            "enabled": None,
+            "passed": None,
+            "dry_run": None,
+            "submitted_count": None,
+            "skipped_count": None,
+            "skipped": False,
+        }
+    output = step_row.get("output")
+    if not isinstance(output, dict):
+        return {
+            "available": False,
+            "enabled": None,
+            "passed": None,
+            "dry_run": None,
+            "submitted_count": None,
+            "skipped_count": None,
+            "skipped": False,
+        }
+
+    skipped = bool(output.get("skipped"))
+    enabled = _parse_optional_bool(output.get("guardrails_enabled"))
+    passed = _parse_optional_bool(output.get("guardrails_passed"))
+    guardrails = output.get("guardrails")
+    if isinstance(guardrails, dict):
+        if enabled is None:
+            enabled = _parse_optional_bool(guardrails.get("enabled"))
+        if passed is None:
+            passed = _parse_optional_bool(guardrails.get("passed"))
+
+    output_path_value = str(output.get("output_path") or "")
+    output_path = Path(output_path_value) if output_path_value else None
+    if output_path and not output_path.is_absolute():
+        output_path = checkpoint_path.parent / output_path
+    if output_path and output_path.exists() and (enabled is None or passed is None):
+        execution_payload = _read_json_dict(output_path)
+        if isinstance(execution_payload, dict):
+            payload_guardrails = execution_payload.get("guardrails")
+            if isinstance(payload_guardrails, dict):
+                if enabled is None:
+                    enabled = _parse_optional_bool(payload_guardrails.get("enabled"))
+                if passed is None:
+                    passed = _parse_optional_bool(payload_guardrails.get("passed"))
+
+    submitted_count = _as_int_or_none(output.get("submitted_count"))
+    skipped_count = _as_int_or_none(output.get("skipped_count"))
+    dry_run = _parse_optional_bool(output.get("dry_run"))
+    available = skipped or enabled is not None or passed is not None
+    return {
+        "available": available,
+        "enabled": enabled,
+        "passed": passed,
+        "dry_run": dry_run,
+        "submitted_count": submitted_count,
+        "skipped_count": skipped_count,
+        "skipped": skipped,
+    }
+
+
 def _load_scheduler_state(path: Path) -> dict[str, Any]:
     payload = _read_json_dict(path)
     if payload is None:
@@ -152,6 +227,113 @@ def _load_scheduler_state(path: Path) -> dict[str, Any]:
     }
 
 
+def _load_latest_preflight_summary(*, preflight_dir: Path | None, runs_root: Path) -> dict[str, Any]:
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def _collect(pattern_root: Path) -> None:
+        if not pattern_root.exists() or not pattern_root.is_dir():
+            return
+        for path in pattern_root.glob("ibkr_preflight_*.md"):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            candidates.append(path)
+
+    if preflight_dir is not None:
+        _collect(preflight_dir)
+    _collect(runs_root / "reports")
+    if runs_root.exists() and runs_root.is_dir():
+        for path in runs_root.glob("*/reports/ibkr_preflight_*.md"):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            candidates.append(path)
+
+    if not candidates:
+        return {
+            "available": False,
+            "reason": "No IBKR preflight reports found.",
+            "path": "",
+            "passed": None,
+            "tickers_checked": None,
+            "failed_count": None,
+            "status_counts": {},
+            "started_at": "",
+            "finished_at": "",
+        }
+
+    latest = max(candidates, key=lambda path: (_safe_mtime(path), path.name))
+    parsed = _parse_preflight_summary(latest)
+    if parsed is None:
+        return {
+            "available": False,
+            "reason": f"Unable to parse preflight summary: {latest}",
+            "path": str(latest),
+            "passed": None,
+            "tickers_checked": None,
+            "failed_count": None,
+            "status_counts": {},
+            "started_at": "",
+            "finished_at": "",
+        }
+    parsed["available"] = True
+    parsed["reason"] = ""
+    return parsed
+
+
+def _parse_preflight_summary(path: Path) -> dict[str, Any] | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    values: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("- "):
+            continue
+        key, sep, value = line[2:].partition(":")
+        if not sep:
+            continue
+        values[key.strip()] = value.strip()
+
+    started_at = str(values.get("started_at") or "")
+    finished_at = str(values.get("finished_at") or "")
+    passed = _parse_optional_bool(values.get("passed"))
+    tickers_checked = _as_int_or_none(values.get("tickers_checked"))
+    failed_count = _as_int_or_none(values.get("failed_count"))
+    status_counts: dict[str, int] = {}
+    for key, value in values.items():
+        if not key.startswith("status_"):
+            continue
+        parsed = _as_int_or_none(value)
+        if parsed is None:
+            continue
+        status_counts[key[len("status_") :]] = parsed
+
+    has_summary = (
+        bool(started_at)
+        or bool(finished_at)
+        or passed is not None
+        or tickers_checked is not None
+        or failed_count is not None
+        or bool(status_counts)
+    )
+    if not has_summary:
+        return None
+    return {
+        "path": str(path),
+        "passed": passed,
+        "tickers_checked": tickers_checked,
+        "failed_count": failed_count,
+        "status_counts": status_counts,
+        "started_at": started_at,
+        "finished_at": finished_at,
+    }
+
+
 def _render_dashboard(
     *,
     title: str,
@@ -160,6 +342,7 @@ def _render_dashboard(
     state_file: Path,
     cycles: list[dict[str, Any]],
     scheduler_state: dict[str, Any],
+    preflight_state: dict[str, Any],
     limit: int,
 ) -> str:
     total = len(cycles)
@@ -237,6 +420,7 @@ def _render_dashboard(
             )
             report_gate = _render_gate_cell(row["report_gate"], label="report")
             orders_gate = _render_gate_cell(row["orders_gate"], label="orders")
+            execution_guardrail = _render_execution_guardrail_cell(row["execution_guardrail"])
             artifact_bits: list[str] = [f"<div class='mono small'>{escape(str(row['checkpoint_path']))}</div>"]
             for key in ("weekly_report_path", "orders_path", "simulation_path"):
                 value = str(row.get(key) or "")
@@ -248,13 +432,49 @@ def _render_dashboard(
             lines.append(f"            <td class='mono'>{escape(str(row['cycle_id']))}</td>")
             lines.append(f"            <td><span class='{status_class}'>{status}</span></td>")
             lines.append(f"            <td class='mono'>{escape(step_text)}</td>")
-            lines.append(f"            <td>{report_gate}<br/>{orders_gate}</td>")
+            lines.append(f"            <td>{report_gate}<br/>{orders_gate}<br/>{execution_guardrail}</td>")
             lines.append(f"            <td class='mono small'>{escape(str(row.get('updated_at') or ''))}</td>")
             lines.append(f"            <td>{''.join(artifact_bits)}</td>")
             lines.append(f"            <td class='small'>{error_text}</td>")
             lines.append("          </tr>")
         lines.append("        </tbody>")
         lines.append("      </table>")
+    lines.append("    </div>")
+
+    lines.append("    <div class='panel'>")
+    lines.append("      <h2>IBKR Preflight</h2>")
+    if not bool(preflight_state.get("available")):
+        lines.append(f"      <div class='small'>{escape(str(preflight_state.get('reason') or 'No preflight summary available.'))}</div>")
+    else:
+        passed = preflight_state.get("passed")
+        if passed is True:
+            pass_label = "pass"
+            pass_class = "status-completed"
+        elif passed is False:
+            pass_label = "fail"
+            pass_class = "status-failed"
+        else:
+            pass_label = "n/a"
+            pass_class = ""
+        lines.append("      <div>")
+        lines.append(f"        <span class='tag'>status: <span class='{pass_class}'>{escape(pass_label)}</span></span>")
+        tickers_checked = _as_int_or_none(preflight_state.get("tickers_checked"))
+        if tickers_checked is not None:
+            lines.append(f"        <span class='tag mono'>tickers_checked: {tickers_checked}</span>")
+        failed_count = _as_int_or_none(preflight_state.get("failed_count"))
+        if failed_count is not None:
+            lines.append(f"        <span class='tag mono'>failed_count: {failed_count}</span>")
+        finished_at = str(preflight_state.get("finished_at") or "")
+        if finished_at:
+            lines.append(f"        <span class='tag mono'>finished_at: {escape(finished_at)}</span>")
+        lines.append("      </div>")
+        status_counts = preflight_state.get("status_counts")
+        if isinstance(status_counts, dict) and status_counts:
+            lines.append("      <div>")
+            for status_key, count in sorted(status_counts.items()):
+                lines.append(f"        <span class='tag mono'>status_{escape(str(status_key))}: {escape(str(count))}</span>")
+            lines.append("      </div>")
+        lines.append(f"      <div class='mono small'>{escape(str(preflight_state.get('path') or ''))}</div>")
     lines.append("    </div>")
 
     lines.append("    <div class='panel'>")
@@ -324,6 +544,41 @@ def _render_gate_cell(gate: dict[str, Any], *, label: str) -> str:
     )
 
 
+def _render_execution_guardrail_cell(summary: dict[str, Any]) -> str:
+    if not bool(summary.get("available")):
+        return "<div class='small'>exec guardrail: n/a</div>"
+    if bool(summary.get("skipped")):
+        return "<div class='small'>exec guardrail: <span class='mono'>skipped</span></div>"
+
+    enabled = _parse_optional_bool(summary.get("enabled"))
+    passed = _parse_optional_bool(summary.get("passed"))
+    if enabled is False:
+        base = "off"
+    elif enabled is True:
+        if passed is True:
+            base = "on/pass"
+        elif passed is False:
+            base = "on/fail"
+        else:
+            base = "on/unknown"
+    else:
+        base = "unknown"
+
+    parts = [base]
+    dry_run = _parse_optional_bool(summary.get("dry_run"))
+    if dry_run is True:
+        parts.append("dry_run=1")
+    elif dry_run is False:
+        parts.append("dry_run=0")
+    submitted_count = _as_int_or_none(summary.get("submitted_count"))
+    if submitted_count is not None:
+        parts.append(f"submitted={submitted_count}")
+    skipped_count = _as_int_or_none(summary.get("skipped_count"))
+    if skipped_count is not None:
+        parts.append(f"skipped={skipped_count}")
+    return f"<div class='small'>exec guardrail: <span class='mono'>{escape(' | '.join(parts))}</span></div>"
+
+
 def _first_metric(metrics: dict[str, Any]) -> str:
     preferred = (
         "item_count",
@@ -339,6 +594,43 @@ def _first_metric(metrics: dict[str, Any]) -> str:
     for key, value in metrics.items():
         return f"{key}={value}"
     return ""
+
+
+def _safe_mtime(path: Path) -> float:
+    try:
+        return float(path.stat().st_mtime)
+    except OSError:
+        return 0.0
+
+
+def _parse_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value == 0:
+            return False
+        if value == 1:
+            return True
+    text = str(value or "").strip().lower()
+    if text in {"true", "yes", "y", "pass", "passed", "1"}:
+        return True
+    if text in {"false", "no", "n", "fail", "failed", "0"}:
+        return False
+    return None
+
+
+def _as_int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(float(text)) if "." in text else int(text)
+    except ValueError:
+        return None
 
 
 def _read_json_dict(path: Path) -> dict[str, Any] | None:
