@@ -3,6 +3,7 @@ import json
 import logging
 from pathlib import Path
 
+from .dashboard import build_dashboard
 from .feed_health import format_health_table, load_feed_health
 from .execution import execute_order_proposal
 from .fetch_prices import fetch_prices_for_policy
@@ -230,6 +231,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit loop immediately when a cycle run fails",
     )
+
+    dashboard_parser = sub.add_parser(
+        "dashboard",
+        help="Build static dashboard HTML from cycle checkpoints and scheduler state",
+    )
+    dashboard_parser.add_argument("--runs-dir", default="runs")
+    dashboard_parser.add_argument("--state-path", default="runs/scheduler_state.json")
+    dashboard_parser.add_argument("--output", default="runs/dashboard.html")
+    dashboard_parser.add_argument("--limit", type=int, default=20)
+    dashboard_parser.add_argument("--title", default="Wealth Agents Dashboard")
 
     fetch_prices = sub.add_parser(
         "fetch-prices",
@@ -519,6 +530,17 @@ def main() -> int:
                     result["period_key"],
                     result["reason"],
                 )
+            return 0
+
+        if args.command == "dashboard":
+            output_path = build_dashboard(
+                runs_dir=args.runs_dir,
+                state_path=args.state_path,
+                output_path=args.output,
+                limit=args.limit,
+                title=args.title,
+            )
+            logging.getLogger(__name__).info("Dashboard generated: %s", output_path)
             return 0
 
         if args.command == "fetch-prices":
