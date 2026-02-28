@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
 
+import pytest
+import yaml
+
 from wealth_agents.broker import BrokerOrderRequest, MockBrokerClient
 from wealth_agents.execution import execute_order_proposal
 
@@ -32,6 +35,11 @@ def _write_proposal(path: Path) -> None:
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_guardrails(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
 
 def test_mock_broker_submit_get_cancel_order(tmp_path: Path):
@@ -95,3 +103,79 @@ def test_execute_order_proposal_submits_to_mock_broker(tmp_path: Path):
     broker = MockBrokerClient(state_path=str(state_path))
     status = broker.get_order(result["submitted"][0]["order_id"])
     assert status.status == "accepted"
+
+
+def test_execute_order_proposal_blocks_on_guardrail_violation(tmp_path: Path):
+    proposal_path = tmp_path / "orders/proposed_2026-03.json"
+    _write_proposal(proposal_path)
+    state_path = tmp_path / "data/broker/mock_state.json"
+    guardrails_path = tmp_path / "config/execution_guardrails.yml"
+    _write_guardrails(
+        guardrails_path,
+        {
+            "enabled": True,
+            "fail_on_violation": True,
+            "max_order_amount_eur": 1000,
+        },
+    )
+
+    with pytest.raises(ValueError, match="Execution guardrails violated"):
+        execute_order_proposal(
+            proposal_path=str(proposal_path),
+            broker="mock",
+            mock_state_path=str(state_path),
+            dry_run=True,
+            guardrails_path=str(guardrails_path),
+        )
+
+
+def test_execute_order_proposal_guardrail_advisory_skips_violating_orders(tmp_path: Path):
+    proposal_path = tmp_path / "orders/proposed_2026-03.json"
+    _write_proposal(proposal_path)
+    state_path = tmp_path / "data/broker/mock_state.json"
+    guardrails_path = tmp_path / "config/execution_guardrails.yml"
+    _write_guardrails(
+        guardrails_path,
+        {
+            "enabled": True,
+            "fail_on_violation": False,
+            "max_order_amount_eur": 1200,
+        },
+    )
+
+    result = execute_order_proposal(
+        proposal_path=str(proposal_path),
+        broker="mock",
+        mock_state_path=str(state_path),
+        dry_run=True,
+        guardrails_path=str(guardrails_path),
+    )
+    assert result["submitted_count"] == 1
+    assert result["skipped_count"] == 1
+    assert "guardrail(advisory)" in result["skipped"][0]["reason"]
+    assert result["guardrails"]["enabled"] is True
+    assert result["guardrails"]["passed"] is False
+
+
+def test_execute_order_proposal_guardrail_whitelist_enforced(tmp_path: Path):
+    proposal_path = tmp_path / "orders/proposed_2026-03.json"
+    _write_proposal(proposal_path)
+    state_path = tmp_path / "data/broker/mock_state.json"
+    guardrails_path = tmp_path / "config/execution_guardrails.yml"
+    _write_guardrails(
+        guardrails_path,
+        {
+            "enabled": True,
+            "fail_on_violation": True,
+            "allowed_instrument_ids": ["sp500_acc"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="allowed_instrument_ids"):
+        execute_order_proposal(
+            proposal_path=str(proposal_path),
+            broker="mock",
+            mock_state_path=str(state_path),
+            dry_run=True,
+            guardrails_path=str(guardrails_path),
+        )

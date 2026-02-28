@@ -22,6 +22,7 @@ DEFAULT_RULES_PATH = "config/rules.yml"
 DEFAULT_IPS_INPUT_PATH = "data/policy/ips_inputs.yml"
 DEFAULT_PRICES_DIR = "data/prices"
 DEFAULT_EXECUTE_BROKER = "mock"
+DEFAULT_EXECUTION_GUARDRAILS_PATH = "config/execution_guardrails.yml"
 DEFAULT_QUALITY_GATE_PROFILE = "off"
 QUALITY_GATE_PROFILES: dict[str, dict[str, Any]] = {
     "off": {
@@ -91,6 +92,8 @@ def run_cycle(
     allow_short_history: bool = False,
     execute_broker: str = DEFAULT_EXECUTE_BROKER,
     execute_dry_run: bool = True,
+    execution_guardrails_path: str = DEFAULT_EXECUTION_GUARDRAILS_PATH,
+    enable_execution_guardrails: bool = True,
     skip_execution: bool = False,
     resume: bool = False,
     quality_gate_profile: str = DEFAULT_QUALITY_GATE_PROFILE,
@@ -273,6 +276,8 @@ def run_cycle(
                 proposal_path=Path(str(propose_out["orders_path"])),
                 execute_broker=execute_broker,
                 execute_dry_run=execute_dry_run,
+                execution_guardrails_path=execution_guardrails_path,
+                enable_execution_guardrails=enable_execution_guardrails,
                 root=root,
                 output_path=execution_output_path,
             ),
@@ -458,6 +463,8 @@ def _run_execute_orders(
     proposal_path: Path,
     execute_broker: str,
     execute_dry_run: bool,
+    execution_guardrails_path: str,
+    enable_execution_guardrails: bool,
     root: Path,
     output_path: Path,
 ) -> dict[str, Any]:
@@ -467,12 +474,16 @@ def _run_execute_orders(
         mock_state_path=str(root / "data/broker/mock_state.json"),
         dry_run=execute_dry_run,
         output_path=str(output_path),
+        guardrails_path=execution_guardrails_path,
+        enable_guardrails=enable_execution_guardrails,
     )
     return {
         "output_path": str(output_path),
         "submitted_count": int(result.get("submitted_count") or 0),
         "skipped_count": int(result.get("skipped_count") or 0),
         "dry_run": bool(result.get("dry_run")),
+        "guardrails_enabled": bool((result.get("guardrails") or {}).get("enabled")),
+        "guardrails_passed": bool((result.get("guardrails") or {}).get("passed")),
         "month": month,
     }
 

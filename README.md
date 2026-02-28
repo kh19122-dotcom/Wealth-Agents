@@ -38,6 +38,10 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
   - `propose-orders` reads `data/policy/policy.yml` and emits monthly BUY-only order proposals
   - outputs JSON proposal in `orders/proposed_<YYYY-MM>.json`
   - outputs human-readable report in `reports/orders_<YYYY-MM>.md`
+- Phase 4.5 execution safety guardrails:
+  - `execute-orders` validates proposal orders against `config/execution_guardrails.yml` before submission
+  - supports per-order limit, total-run limit, max order count, and optional allow-lists
+  - applies to direct `execute-orders` and orchestration execution steps (`run-cycle`, `run-scheduler`)
 - Phase 3.7 price fetch enhancements:
   - `fetch-prices` supports source preference (`yahoo`, `ibkr`, `auto`)
   - IBKR-first fetch can fall back to Yahoo when IBKR is unavailable
@@ -55,6 +59,7 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
   - `python -m wealth_agents policy-review --week 2026-W06`
   - `python -m wealth_agents policy-review --week 2026-W06 --apply --yes`
   - `python -m wealth_agents propose-orders --month 2026-03`
+  - `python -m wealth_agents execute-orders --proposal orders/proposed_2026-03.json --dry-run`
   - `python -m wealth_agents ibkr-preflight --ibkr-contracts config/ibkr_contracts.yml`
   - `python -m wealth_agents fetch-prices --start 2025-01-01 --end 2025-12-31 --prefer-source ibkr --ibkr-contracts config/ibkr_contracts.yml`
 
@@ -198,6 +203,15 @@ uv run python -m wealth_agents propose-orders --month 2026-03
 uv run python -m wealth_agents propose-orders --month 2026-03 --amount 2500
 ```
 
+Execute with guardrails (dry-run first):
+
+```bash
+uv run python -m wealth_agents execute-orders \
+  --proposal orders/proposed_2026-03.json \
+  --dry-run \
+  --guardrails config/execution_guardrails.yml
+```
+
 Fetch prices with IBKR-first fallback:
 
 ```bash
@@ -232,6 +246,7 @@ wealth_agents/
   rules.py
   utils.py
 config/
+  execution_guardrails.yml
   feeds.yml
   rules.yml
 data/
