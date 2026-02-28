@@ -41,7 +41,9 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
 - Phase 3.7 price fetch enhancements:
   - `fetch-prices` supports source preference (`yahoo`, `ibkr`, `auto`)
   - IBKR-first fetch can fall back to Yahoo when IBKR is unavailable
+  - optional IBKR-vs-Yahoo divergence gate (`--price-quality-gate standard|strict`)
   - optional contract mapping file (`config/ibkr_contracts.example.yml`)
+  - `ibkr-preflight` validates TWS/Gateway connectivity, contract mapping, and market-data access
 - CLI commands:
   - `python -m wealth_agents collect --config config/feeds.yml`
   - `python -m wealth_agents ingest --path inputs --source manual`
@@ -53,6 +55,7 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
   - `python -m wealth_agents policy-review --week 2026-W06`
   - `python -m wealth_agents policy-review --week 2026-W06 --apply --yes`
   - `python -m wealth_agents propose-orders --month 2026-03`
+  - `python -m wealth_agents ibkr-preflight --ibkr-contracts config/ibkr_contracts.yml`
   - `python -m wealth_agents fetch-prices --start 2025-01-01 --end 2025-12-31 --prefer-source ibkr --ibkr-contracts config/ibkr_contracts.yml`
 
 ## Setup (uv)
@@ -199,10 +202,12 @@ Fetch prices with IBKR-first fallback:
 
 ```bash
 cp config/ibkr_contracts.example.yml config/ibkr_contracts.yml
+uv run python -m wealth_agents ibkr-preflight --ibkr-contracts config/ibkr_contracts.yml
 uv run python -m wealth_agents fetch-prices \
   --start 2025-01-01 --end 2026-02-28 \
   --provider yahoo \
   --prefer-source ibkr \
+  --price-quality-gate strict \
   --ibkr-contracts config/ibkr_contracts.yml
 ```
 

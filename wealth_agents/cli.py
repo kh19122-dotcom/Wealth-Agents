@@ -8,6 +8,7 @@ from .feed_health import format_health_table, load_feed_health
 from .execution import execute_order_proposal
 from .fetch_prices import fetch_prices_for_policy
 from .ingest import ingest_manual_inputs
+from .ibkr_preflight import run_ibkr_preflight
 from .ips import (
     diversify_policy_instruments,
     draft_policy,
@@ -261,6 +262,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exit loop immediately when a cycle run fails",
     )
 
+    ibkr_preflight = sub.add_parser(
+        "ibkr-preflight",
+        help="Validate IBKR connectivity, contract mappings, and historical market data access",
+    )
+    ibkr_preflight.add_argument("--policy", default="data/policy/policy.yml", help="Policy YAML path")
+    ibkr_preflight.add_argument(
+        "--ibkr-contracts",
+        default="config/ibkr_contracts.yml",
+        help="IBKR contract mapping YAML path",
+    )
+    ibkr_preflight.add_argument("--ibkr-host", default="127.0.0.1", help="IBKR TWS/Gateway host")
+    ibkr_preflight.add_argument("--ibkr-port", type=int, default=7497, help="IBKR TWS/Gateway port")
+    ibkr_preflight.add_argument("--ibkr-client-id", type=int, default=37, help="IBKR API client id")
+    ibkr_preflight.add_argument(
+        "--ibkr-timeout-sec",
+        type=float,
+        default=8.0,
+        help="IBKR API connect timeout in seconds",
+    )
+    ibkr_preflight.add_argument(
+        "--ibkr-lookback-days",
+        type=int,
+        default=14,
+        help="Historical lookback window for market-data check (default: 14)",
+    )
+    ibkr_preflight.add_argument("--report-dir", default="reports", help="Output markdown report directory")
+    ibkr_preflight.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Exit 0 even when some tickers fail preflight checks.",
+    )
+
     dashboard_parser = sub.add_parser(
         "dashboard",
         help="Build static dashboard HTML from cycle checkpoints and scheduler state",
@@ -317,6 +350,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-source-fallback",
         action="store_true",
         help="Disable source fallback when prefer-source is ibkr/auto.",
+    )
+    fetch_prices.add_argument(
+        "--price-quality-gate",
+        choices=("off", "standard", "strict"),
+        default="off",
+        help="IBKR-vs-Yahoo divergence quality gate profile (default: off).",
     )
     fetch_prices.add_argument("--policy", default="data/policy/policy.yml", help="Policy YAML path")
     fetch_prices.add_argument("--prices-dir", default="data/prices", help="Local cache root directory")
@@ -627,6 +666,31 @@ def main() -> int:
             logging.getLogger(__name__).info("Dashboard generated: %s", output_path)
             return 0
 
+        if args.command == "ibkr-preflight":
+            summary = run_ibkr_preflight(
+                policy_path=args.policy,
+                ibkr_contracts_path=args.ibkr_contracts,
+                host=args.ibkr_host,
+                port=args.ibkr_port,
+                client_id=args.ibkr_client_id,
+                timeout_sec=args.ibkr_timeout_sec,
+                lookback_days=args.ibkr_lookback_days,
+                report_dir=args.report_dir,
+            )
+            logging.getLogger(__name__).info(
+                "IBKR preflight: passed=%s tickers=%s failed=%s report=%s",
+                summary["passed"],
+                summary["tickers_count"],
+                summary["failed_count"],
+                summary["report_path"],
+            )
+            if not summary["passed"] and not args.allow_partial:
+                raise RuntimeError(
+                    "IBKR preflight failed. Review report: "
+                    f"{summary['report_path']} (use --allow-partial to continue anyway)"
+                )
+            return 0
+
         if args.command == "fetch-prices":
             summary = fetch_prices_for_policy(
                 start=args.start,
@@ -642,6 +706,7 @@ def main() -> int:
                 ibkr_timeout_sec=args.ibkr_timeout_sec,
                 ibkr_max_retries=args.ibkr_max_retries,
                 allow_source_fallback=not args.no_source_fallback,
+                price_quality_gate_profile=args.price_quality_gate,
             )
             logging.getLogger(__name__).info(
                 "Price fetch summary: tickers_succeeded=%s tickers_skipped_empty=%s tickers_failed=%s total_rows_downloaded=%s",
@@ -657,30 +722,46 @@ def main() -> int:
                 ",".join(summary.get("source_order", [])),
                 summary["tickers_count"],
             )
+            logging.getLogger(__name__).info(
+                "Price quality gate: profile=%s evaluated=%s passed=%s failed=%s",
+                summary.get("price_quality_gate_profile"),
+                summary.get("price_quality_gate_evaluated"),
+                summary.get("price_quality_gate_passed"),
+                summary.get("price_quality_gate_failed"),
+            )
             for row in summary["tickers"]:
                 status = str(row.get("status") or "unknown")
+                gate = row.get("price_quality_gate") or {}
+                gate_profile = gate.get("profile")
+                gate_passed = gate.get("passed")
                 if status == "failed":
                     logging.getLogger(__name__).warning(
-                        "Price cache: ticker=%s status=%s error=%s",
+                        "Price cache: ticker=%s status=%s gate_profile=%s gate_passed=%s error=%s",
                         row["ticker"],
                         status,
+                        gate_profile,
+                        gate_passed,
                         row.get("error"),
                     )
                 elif status == "skipped_empty":
                     logging.getLogger(__name__).warning(
-                        "Price cache: ticker=%s status=%s attempted=%s had_existing_cache=%s rows_total=%s",
+                        "Price cache: ticker=%s status=%s gate_profile=%s gate_passed=%s attempted=%s had_existing_cache=%s rows_total=%s",
                         row["ticker"],
                         status,
+                        gate_profile,
+                        gate_passed,
                         ",".join(row.get("sources_attempted", [])),
                         row.get("had_existing_cache"),
                         row.get("rows_total"),
                     )
                 else:
                     logging.getLogger(__name__).info(
-                        "Price cache: ticker=%s status=%s source=%s rows_total=%s rows_appended=%s downloaded_rows=%s",
+                        "Price cache: ticker=%s status=%s source=%s gate_profile=%s gate_passed=%s rows_total=%s rows_appended=%s downloaded_rows=%s",
                         row["ticker"],
                         status,
                         row.get("source_used"),
+                        gate_profile,
+                        gate_passed,
                         row["rows_total"],
                         row["rows_appended"],
                         row["downloaded_rows"],

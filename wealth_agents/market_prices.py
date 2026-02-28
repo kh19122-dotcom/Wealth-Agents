@@ -242,7 +242,7 @@ def fetch_ibkr_adj_close(
     for attempt in range(1, max_retries + 1):
         ib = IB()
         try:
-            contract = _build_ibkr_contract(contract_spec)
+            contract = build_ibkr_contract(contract_spec)
             ib.connect(
                 host=str(host),
                 port=int(port),
@@ -414,7 +414,7 @@ def _format_price(value: float) -> str:
     return f"{float(value):.10f}"
 
 
-def _build_ibkr_contract(contract_spec: dict[str, Any]) -> Any:
+def build_ibkr_contract(contract_spec: dict[str, Any]) -> Any:
     if not isinstance(contract_spec, dict):
         raise ValueError("IBKR contract spec must be a mapping.")
 
