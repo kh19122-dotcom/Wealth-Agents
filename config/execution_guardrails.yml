@@ -1,0 +1,16 @@
+enabled: true
+fail_on_violation: true
+
+# Maximum cash amount per single BUY order.
+max_order_amount_eur: 3000
+
+# Maximum total cash amount submitted in one execution run.
+max_total_amount_eur: 6000
+
+# Maximum number of BUY orders per execution run.
+max_orders_count: 12
+
+# Optional allow-lists (empty means unrestricted by that field).
+allowed_instrument_ids: []
+allowed_isins: []
+allowed_buckets: []

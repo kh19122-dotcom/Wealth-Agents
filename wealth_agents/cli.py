@@ -155,6 +155,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional execution result JSON output path",
     )
+    execute_orders.add_argument(
+        "--guardrails",
+        default="config/execution_guardrails.yml",
+        help="Execution guardrails YAML path (default: config/execution_guardrails.yml)",
+    )
+    execute_orders.add_argument(
+        "--no-guardrails",
+        action="store_true",
+        help="Disable execution guardrails for this run.",
+    )
 
     run_cycle_parser = sub.add_parser("run-cycle", help="Run Phase 1->4 orchestration cycle with checkpoints")
     run_cycle_parser.add_argument("--cycle-id", default=None, help="Optional cycle identifier")
@@ -184,6 +194,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--execute-submit",
         action="store_true",
         help="Submit broker orders (default is dry-run execution).",
+    )
+    run_cycle_parser.add_argument(
+        "--execution-guardrails",
+        default="config/execution_guardrails.yml",
+        help="Execution guardrails YAML path (default: config/execution_guardrails.yml)",
+    )
+    run_cycle_parser.add_argument(
+        "--no-execution-guardrails",
+        action="store_true",
+        help="Disable execution guardrails for run-cycle execution.",
     )
     run_cycle_parser.add_argument("--skip-execution", action="store_true")
     run_cycle_parser.add_argument("--resume", action="store_true")
@@ -239,6 +259,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--execute-submit",
         action="store_true",
         help="Submit broker orders (default is dry-run execution).",
+    )
+    run_scheduler_parser.add_argument(
+        "--execution-guardrails",
+        default="config/execution_guardrails.yml",
+        help="Execution guardrails YAML path (default: config/execution_guardrails.yml)",
+    )
+    run_scheduler_parser.add_argument(
+        "--no-execution-guardrails",
+        action="store_true",
+        help="Disable execution guardrails for scheduler-triggered runs.",
     )
     run_scheduler_parser.add_argument("--skip-execution", action="store_true")
     run_scheduler_parser.add_argument("--resume", action="store_true")
@@ -562,6 +592,8 @@ def main() -> int:
                 mock_state_path=args.mock_state,
                 dry_run=args.dry_run,
                 output_path=args.output,
+                guardrails_path=args.guardrails,
+                enable_guardrails=(not args.no_guardrails),
             )
             logging.getLogger(__name__).info(
                 "Order execution complete: broker=%s dry_run=%s submitted=%s skipped=%s",
@@ -593,6 +625,8 @@ def main() -> int:
                 quality_gate_profile=args.quality_gate_profile,
                 execute_broker=args.execute_broker,
                 execute_dry_run=(not args.execute_submit),
+                execution_guardrails_path=args.execution_guardrails,
+                enable_execution_guardrails=(not args.no_execution_guardrails),
                 skip_execution=args.skip_execution,
                 resume=args.resume,
             )
@@ -627,6 +661,8 @@ def main() -> int:
                 "quality_gate_profile": args.quality_gate_profile,
                 "execute_broker": args.execute_broker,
                 "execute_dry_run": (not args.execute_submit),
+                "execution_guardrails_path": args.execution_guardrails,
+                "enable_execution_guardrails": (not args.no_execution_guardrails),
                 "skip_execution": args.skip_execution,
                 "resume": args.resume,
                 "force": args.force,
