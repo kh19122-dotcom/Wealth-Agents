@@ -38,6 +38,10 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
   - `propose-orders` reads `data/policy/policy.yml` and emits monthly BUY-only order proposals
   - outputs JSON proposal in `orders/proposed_<YYYY-MM>.json`
   - outputs human-readable report in `reports/orders_<YYYY-MM>.md`
+- Phase 3.7 price fetch enhancements:
+  - `fetch-prices` supports source preference (`yahoo`, `ibkr`, `auto`)
+  - IBKR-first fetch can fall back to Yahoo when IBKR is unavailable
+  - optional contract mapping file (`config/ibkr_contracts.example.yml`)
 - CLI commands:
   - `python -m wealth_agents collect --config config/feeds.yml`
   - `python -m wealth_agents ingest --path inputs --source manual`
@@ -49,11 +53,18 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
   - `python -m wealth_agents policy-review --week 2026-W06`
   - `python -m wealth_agents policy-review --week 2026-W06 --apply --yes`
   - `python -m wealth_agents propose-orders --month 2026-03`
+  - `python -m wealth_agents fetch-prices --start 2025-01-01 --end 2025-12-31 --prefer-source ibkr --ibkr-contracts config/ibkr_contracts.yml`
 
 ## Setup (uv)
 
 ```bash
 uv sync --extra dev
+```
+
+For IBKR price source support:
+
+```bash
+uv sync --extra dev --extra ibkr
 ```
 
 ### Portfolio (first-time setup)
@@ -62,21 +73,15 @@ The live portfolio state file is local-only (gitignored). Create it from the exa
 
 ```bash
 cp data/portfolio/live.example.json data/portfolio/live.json
+```
 
-(Docs: add portfolio first-time setup and ignore local portfolio backups)
-
-```md
 Then import trades and generate a drift report:
 
 ```bash
 uv run python -m wealth_agents portfolio import-trades --csv <path/to/trades.csv>
 uv run python -m wealth_agents portfolio report --asof YYYY-MM-DD
+```
 
-
-<<<<<<< HEAD
-=======
-
->>>>>>> ee78141 (Docs: add portfolio first-time setup and ignore local portfolio backups)
 ## Usage
 
 Collect latest feed items:
@@ -188,6 +193,17 @@ Propose monthly BUY orders from finalized policy:
 ```bash
 uv run python -m wealth_agents propose-orders --month 2026-03
 uv run python -m wealth_agents propose-orders --month 2026-03 --amount 2500
+```
+
+Fetch prices with IBKR-first fallback:
+
+```bash
+cp config/ibkr_contracts.example.yml config/ibkr_contracts.yml
+uv run python -m wealth_agents fetch-prices \
+  --start 2025-01-01 --end 2026-02-28 \
+  --provider yahoo \
+  --prefer-source ibkr \
+  --ibkr-contracts config/ibkr_contracts.yml
 ```
 
 Phase 3 design details and output schema: `docs/Phase3.md`.

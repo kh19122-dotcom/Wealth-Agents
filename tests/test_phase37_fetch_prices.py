@@ -35,6 +35,18 @@ def _write_policy(path: Path, tickers: list[str]) -> None:
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
 
+def _write_ibkr_contracts(path: Path, tickers: list[str]) -> None:
+    contracts = {}
+    for ticker in tickers:
+        contracts[ticker] = {
+            "symbol": ticker.split(".")[0],
+            "secType": "STK",
+            "exchange": "SMART",
+        }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump({"contracts": contracts}, sort_keys=False), encoding="utf-8")
+
+
 def test_fetch_prices_partial_success_with_empty_ticker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     policy_path = tmp_path / "data/policy/policy.yml"
     _write_policy(policy_path, ["AAA.DE", "BBB.DE"])
@@ -158,3 +170,122 @@ def test_fetch_prices_all_failed_but_existing_cache_succeeds(monkeypatch: pytest
     assert summary["tickers_skipped_empty"] == 0
     by_ticker = {row["ticker"]: row for row in summary["tickers"]}
     assert by_ticker["BBB.DE"]["had_existing_cache"] is True
+
+
+def test_fetch_prices_prefer_ibkr_uses_ibkr_when_available(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    policy_path = tmp_path / "data/policy/policy.yml"
+    contracts_path = tmp_path / "config/ibkr_contracts.yml"
+    _write_policy(policy_path, ["AAA.DE"])
+    _write_ibkr_contracts(contracts_path, ["AAA.DE"])
+
+    called = {"ibkr": 0, "yahoo": 0}
+
+    def fake_ibkr(cache_path: Path, ticker: str, contract_spec, start, end, **kwargs):
+        called["ibkr"] += 1
+        return {
+            "ticker": ticker,
+            "rows_total": 5,
+            "rows_appended": 5,
+            "downloaded_rows": 5,
+            "series": {},
+            "cache_path": str(cache_path),
+        }
+
+    def fake_yahoo(cache_path: Path, ticker: str, start, end, max_retries: int = 3):
+        called["yahoo"] += 1
+        return {
+            "ticker": ticker,
+            "rows_total": 1,
+            "rows_appended": 1,
+            "downloaded_rows": 1,
+            "series": {},
+            "cache_path": str(cache_path),
+        }
+
+    monkeypatch.setattr("wealth_agents.fetch_prices.sync_ibkr_price_cache", fake_ibkr)
+    monkeypatch.setattr("wealth_agents.fetch_prices.sync_yahoo_price_cache", fake_yahoo)
+
+    summary = fetch_prices_for_policy(
+        start="2025-01-01",
+        end="2025-01-31",
+        policy_path=str(policy_path),
+        prices_dir=str(tmp_path / "data/prices"),
+        prefer_source="ibkr",
+        ibkr_contracts_path=str(contracts_path),
+    )
+
+    assert summary["tickers_succeeded"] == 1
+    assert called["ibkr"] == 1
+    assert called["yahoo"] == 0
+    row = summary["tickers"][0]
+    assert row["source_used"] == "ibkr"
+    assert row["sources_attempted"] == ["ibkr"]
+    assert row["fallback_used"] is False
+
+
+def test_fetch_prices_prefer_ibkr_falls_back_to_yahoo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    policy_path = tmp_path / "data/policy/policy.yml"
+    contracts_path = tmp_path / "config/ibkr_contracts.yml"
+    _write_policy(policy_path, ["AAA.DE"])
+    _write_ibkr_contracts(contracts_path, ["AAA.DE"])
+
+    def fake_ibkr(cache_path: Path, ticker: str, contract_spec, start, end, **kwargs):
+        raise RuntimeError("IBKR connection failed")
+
+    def fake_yahoo(cache_path: Path, ticker: str, start, end, max_retries: int = 3):
+        return {
+            "ticker": ticker,
+            "rows_total": 2,
+            "rows_appended": 2,
+            "downloaded_rows": 2,
+            "series": {},
+            "cache_path": str(cache_path),
+        }
+
+    monkeypatch.setattr("wealth_agents.fetch_prices.sync_ibkr_price_cache", fake_ibkr)
+    monkeypatch.setattr("wealth_agents.fetch_prices.sync_yahoo_price_cache", fake_yahoo)
+
+    summary = fetch_prices_for_policy(
+        start="2025-01-01",
+        end="2025-01-31",
+        policy_path=str(policy_path),
+        prices_dir=str(tmp_path / "data/prices"),
+        prefer_source="ibkr",
+        ibkr_contracts_path=str(contracts_path),
+    )
+
+    assert summary["tickers_succeeded"] == 1
+    row = summary["tickers"][0]
+    assert row["source_used"] == "yahoo"
+    assert row["sources_attempted"] == ["ibkr", "yahoo"]
+    assert row["fallback_used"] is True
+
+
+def test_fetch_prices_prefer_ibkr_without_mapping_can_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    policy_path = tmp_path / "data/policy/policy.yml"
+    _write_policy(policy_path, ["AAA.DE"])
+
+    def fake_yahoo(cache_path: Path, ticker: str, start, end, max_retries: int = 3):
+        return {
+            "ticker": ticker,
+            "rows_total": 4,
+            "rows_appended": 4,
+            "downloaded_rows": 4,
+            "series": {},
+            "cache_path": str(cache_path),
+        }
+
+    monkeypatch.setattr("wealth_agents.fetch_prices.sync_yahoo_price_cache", fake_yahoo)
+
+    summary = fetch_prices_for_policy(
+        start="2025-01-01",
+        end="2025-01-31",
+        policy_path=str(policy_path),
+        prices_dir=str(tmp_path / "data/prices"),
+        prefer_source="ibkr",
+    )
+
+    assert summary["tickers_succeeded"] == 1
+    row = summary["tickers"][0]
+    assert row["source_used"] == "yahoo"
+    assert row["sources_attempted"] == ["ibkr", "yahoo"]

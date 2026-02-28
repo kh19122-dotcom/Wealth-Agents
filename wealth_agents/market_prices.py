@@ -218,6 +218,148 @@ def sync_yahoo_price_cache(
     }
 
 
+def fetch_ibkr_adj_close(
+    contract_spec: dict[str, Any],
+    start: date,
+    end: date,
+    host: str = "127.0.0.1",
+    port: int = 7497,
+    client_id: int = 37,
+    timeout_sec: float = 8.0,
+    max_retries: int = 2,
+) -> dict[date, float]:
+    if start > end:
+        return {}
+
+    try:
+        from ib_insync import IB
+    except ImportError as exc:
+        raise RuntimeError(
+            "ib_insync is required for IBKR price fetch. Install dependencies and retry."
+        ) from exc
+
+    last_error: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        ib = IB()
+        try:
+            contract = _build_ibkr_contract(contract_spec)
+            ib.connect(
+                host=str(host),
+                port=int(port),
+                clientId=int(client_id),
+                timeout=float(timeout_sec),
+                readonly=True,
+            )
+            qualified = ib.qualifyContracts(contract)
+            if not qualified:
+                raise RuntimeError("IBKR contract qualification returned no match.")
+            resolved = qualified[0]
+
+            duration_days = max(5, (end - start).days + 5)
+            end_datetime = (end + timedelta(days=1)).strftime("%Y%m%d 00:00:00 UTC")
+            what_to_show = str(contract_spec.get("what_to_show") or "TRADES")
+            use_rth = bool(contract_spec.get("use_rth", True))
+            bars = ib.reqHistoricalData(
+                resolved,
+                endDateTime=end_datetime,
+                durationStr=f"{duration_days} D",
+                barSizeSetting="1 day",
+                whatToShow=what_to_show,
+                useRTH=use_rth,
+                formatDate=1,
+            )
+
+            series: dict[date, float] = {}
+            for bar in bars or []:
+                parsed_date = _coerce_ibkr_bar_date(getattr(bar, "date", None))
+                if parsed_date is None or parsed_date < start or parsed_date > end:
+                    continue
+                close_value = getattr(bar, "close", None)
+                if close_value is None:
+                    continue
+                px = float(close_value)
+                if math.isnan(px):
+                    continue
+                series[parsed_date] = px
+
+            if not series:
+                if _range_has_weekday(start, end):
+                    raise RuntimeError(
+                        f"Received empty IBKR price data between {start.isoformat()} and {end.isoformat()}. "
+                        "Verify IBKR contract mapping and market data permissions."
+                    )
+                return {}
+            return series
+        except Exception as exc:  # pragma: no cover - depends on IBKR runtime
+            last_error = exc
+            if attempt < max_retries:
+                time.sleep(0.4 * (2 ** (attempt - 1)))
+                continue
+            break
+        finally:
+            try:
+                ib.disconnect()
+            except Exception:
+                pass
+
+    if last_error is not None:
+        raise RuntimeError(f"Failed to fetch IBKR prices: {last_error}") from last_error
+    raise RuntimeError("Failed to fetch IBKR prices.")
+
+
+def sync_ibkr_price_cache(
+    cache_path: Path,
+    ticker: str,
+    contract_spec: dict[str, Any],
+    start: date,
+    end: date,
+    host: str = "127.0.0.1",
+    port: int = 7497,
+    client_id: int = 37,
+    timeout_sec: float = 8.0,
+    max_retries: int = 2,
+) -> dict[str, Any]:
+    existing = read_price_cache(cache_path)
+    missing_ranges = compute_missing_ranges(existing, start, end)
+
+    downloaded: dict[date, float] = {}
+    for range_start, range_end in missing_ranges:
+        fetched = fetch_ibkr_adj_close(
+            contract_spec=contract_spec,
+            start=range_start,
+            end=range_end,
+            host=host,
+            port=port,
+            client_id=client_id,
+            timeout_sec=timeout_sec,
+            max_retries=max_retries,
+        )
+        downloaded.update(fetched)
+
+    merged = dict(existing)
+    merged.update(downloaded)
+    if not merged:
+        raise RuntimeError(
+            f"No IBKR adjusted-close data was retrieved for ticker '{ticker}'. "
+            "Verify IBKR contract mapping and requested date range."
+        )
+
+    rows_before = len(existing)
+    rows_after = len(merged)
+    rows_appended = max(0, rows_after - rows_before)
+    if (not cache_path.exists()) or downloaded:
+        write_price_cache(cache_path, merged)
+
+    return {
+        "ticker": ticker,
+        "rows_total": rows_after,
+        "rows_appended": rows_appended,
+        "downloaded_rows": len(downloaded),
+        "series": merged,
+        "cache_path": str(cache_path),
+    }
+
+
 def get_yahoo_ticker_currency(
     ticker: str,
     max_retries: int = 2,
@@ -272,6 +414,48 @@ def _format_price(value: float) -> str:
     return f"{float(value):.10f}"
 
 
+def _build_ibkr_contract(contract_spec: dict[str, Any]) -> Any:
+    if not isinstance(contract_spec, dict):
+        raise ValueError("IBKR contract spec must be a mapping.")
+
+    try:
+        from ib_insync import Contract
+    except ImportError as exc:
+        raise RuntimeError(
+            "ib_insync is required for IBKR price fetch. Install dependencies and retry."
+        ) from exc
+
+    raw_conid = contract_spec.get("conid", contract_spec.get("conId"))
+    symbol = str(contract_spec.get("symbol") or "").strip()
+    sec_type = str(contract_spec.get("sec_type", contract_spec.get("secType", "STK"))).strip() or "STK"
+    exchange = str(contract_spec.get("exchange") or "SMART").strip() or "SMART"
+    currency = str(contract_spec.get("currency") or "").strip().upper()
+    primary_exchange = str(
+        contract_spec.get("primary_exchange", contract_spec.get("primaryExchange", ""))
+    ).strip()
+
+    kwargs: dict[str, Any] = {
+        "secType": sec_type,
+        "exchange": exchange,
+    }
+    if symbol:
+        kwargs["symbol"] = symbol
+    if currency:
+        kwargs["currency"] = currency
+    if primary_exchange:
+        kwargs["primaryExchange"] = primary_exchange
+
+    if raw_conid is not None and str(raw_conid).strip():
+        try:
+            kwargs["conId"] = int(raw_conid)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("IBKR contract conid/conId must be an integer.") from exc
+    elif not symbol:
+        raise ValueError("IBKR contract must include either conid/conId or symbol.")
+
+    return Contract(**kwargs)
+
+
 def _extract_currency(source: Any) -> str | None:
     if source is None:
         return None
@@ -314,3 +498,29 @@ def _range_has_weekday(start: date, end: date) -> bool:
             return True
         cursor += timedelta(days=1)
     return False
+
+
+def _coerce_ibkr_bar_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if len(text) >= 8 and text[:8].isdigit():
+        try:
+            return datetime.strptime(text[:8], "%Y%m%d").date()
+        except ValueError:
+            pass
+    if len(text) >= 10:
+        head = text[:10]
+        try:
+            return datetime.strptime(head, "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    return None

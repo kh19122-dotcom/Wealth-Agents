@@ -1,0 +1,56 @@
+contracts:
+  # Prefer conid when possible (most stable).
+  # CSPX.L:
+  #   conid: 123456789
+  #   exchange: LSEETF
+  #   currency: USD
+
+  # Fallback form when conid is not known yet.
+  CSPX.L:
+    symbol: CSPX
+    secType: STK
+    exchange: SMART
+    primaryExchange: LSEETF
+    currency: USD
+
+  XUSE.AS:
+    symbol: XUSE
+    secType: STK
+    exchange: SMART
+    primaryExchange: AEB
+    currency: EUR
+
+  EIMI.L:
+    symbol: EIMI
+    secType: STK
+    exchange: SMART
+    primaryExchange: LSEETF
+    currency: USD
+
+  WSML.L:
+    symbol: WSML
+    secType: STK
+    exchange: SMART
+    primaryExchange: LSEETF
+    currency: USD
+
+  AGGH.L:
+    symbol: AGGH
+    secType: STK
+    exchange: SMART
+    primaryExchange: LSEETF
+    currency: USD
+
+  XEON.DE:
+    symbol: XEON
+    secType: STK
+    exchange: SMART
+    primaryExchange: IBIS
+    currency: EUR
+
+  4GLD.DE:
+    symbol: 4GLD
+    secType: STK
+    exchange: SMART
+    primaryExchange: IBIS
+    currency: EUR

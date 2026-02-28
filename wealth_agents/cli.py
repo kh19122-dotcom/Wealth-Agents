@@ -278,13 +278,46 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  python -m wealth_agents fetch-prices --start 2024-02-01 --end 2026-02-09\n"
-            "  python -m wealth_agents fetch-prices --start 2025-01-01 --end 2025-12-31 --provider yahoo"
+            "  python -m wealth_agents fetch-prices --start 2025-01-01 --end 2025-12-31 --provider yahoo\n"
+            "  python -m wealth_agents fetch-prices --start 2025-01-01 --end 2025-12-31 "
+            "--prefer-source ibkr --ibkr-contracts config/ibkr_contracts.yml"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     fetch_prices.add_argument("--start", required=True, help="Start date (inclusive), format YYYY-MM-DD")
     fetch_prices.add_argument("--end", required=True, help="End date (inclusive), format YYYY-MM-DD")
     fetch_prices.add_argument("--provider", default="yahoo", help="Price provider name (default: yahoo)")
+    fetch_prices.add_argument(
+        "--prefer-source",
+        default="yahoo",
+        choices=("yahoo", "ibkr", "auto"),
+        help="Preferred fetch source. auto/ibkr attempts IBKR first and can fall back to Yahoo.",
+    )
+    fetch_prices.add_argument(
+        "--ibkr-contracts",
+        default=None,
+        help="Optional IBKR contract mapping YAML (ticker -> contract fields).",
+    )
+    fetch_prices.add_argument("--ibkr-host", default="127.0.0.1", help="IBKR TWS/Gateway host")
+    fetch_prices.add_argument("--ibkr-port", type=int, default=7497, help="IBKR TWS/Gateway port")
+    fetch_prices.add_argument("--ibkr-client-id", type=int, default=37, help="IBKR API client id")
+    fetch_prices.add_argument(
+        "--ibkr-timeout-sec",
+        type=float,
+        default=8.0,
+        help="IBKR API connect timeout in seconds",
+    )
+    fetch_prices.add_argument(
+        "--ibkr-max-retries",
+        type=int,
+        default=2,
+        help="IBKR fetch retries per request",
+    )
+    fetch_prices.add_argument(
+        "--no-source-fallback",
+        action="store_true",
+        help="Disable source fallback when prefer-source is ibkr/auto.",
+    )
     fetch_prices.add_argument("--policy", default="data/policy/policy.yml", help="Policy YAML path")
     fetch_prices.add_argument("--prices-dir", default="data/prices", help="Local cache root directory")
 
@@ -601,6 +634,14 @@ def main() -> int:
                 provider=args.provider,
                 policy_path=args.policy,
                 prices_dir=args.prices_dir,
+                prefer_source=args.prefer_source,
+                ibkr_contracts_path=args.ibkr_contracts,
+                ibkr_host=args.ibkr_host,
+                ibkr_port=args.ibkr_port,
+                ibkr_client_id=args.ibkr_client_id,
+                ibkr_timeout_sec=args.ibkr_timeout_sec,
+                ibkr_max_retries=args.ibkr_max_retries,
+                allow_source_fallback=not args.no_source_fallback,
             )
             logging.getLogger(__name__).info(
                 "Price fetch summary: tickers_succeeded=%s tickers_skipped_empty=%s tickers_failed=%s total_rows_downloaded=%s",
@@ -610,8 +651,10 @@ def main() -> int:
                 summary["total_rows_downloaded"],
             )
             logging.getLogger(__name__).info(
-                "Price fetch complete: provider=%s tickers=%s",
+                "Price fetch complete: provider=%s preferred_source=%s source_order=%s tickers=%s",
                 summary["provider"],
+                summary.get("preferred_source"),
+                ",".join(summary.get("source_order", [])),
                 summary["tickers_count"],
             )
             for row in summary["tickers"]:
@@ -625,17 +668,19 @@ def main() -> int:
                     )
                 elif status == "skipped_empty":
                     logging.getLogger(__name__).warning(
-                        "Price cache: ticker=%s status=%s had_existing_cache=%s rows_total=%s",
+                        "Price cache: ticker=%s status=%s attempted=%s had_existing_cache=%s rows_total=%s",
                         row["ticker"],
                         status,
+                        ",".join(row.get("sources_attempted", [])),
                         row.get("had_existing_cache"),
                         row.get("rows_total"),
                     )
                 else:
                     logging.getLogger(__name__).info(
-                        "Price cache: ticker=%s status=%s rows_total=%s rows_appended=%s downloaded_rows=%s",
+                        "Price cache: ticker=%s status=%s source=%s rows_total=%s rows_appended=%s downloaded_rows=%s",
                         row["ticker"],
                         status,
+                        row.get("source_used"),
                         row["rows_total"],
                         row["rows_appended"],
                         row["downloaded_rows"],
