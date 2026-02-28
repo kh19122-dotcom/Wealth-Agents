@@ -268,6 +268,11 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_parser.add_argument("--runs-dir", default="runs")
     dashboard_parser.add_argument("--state-path", default="runs/scheduler_state.json")
     dashboard_parser.add_argument("--output", default="runs/dashboard.html")
+    dashboard_parser.add_argument(
+        "--preflight-dir",
+        default="reports",
+        help="Directory containing ibkr_preflight_*.md reports (default: reports).",
+    )
     dashboard_parser.add_argument("--limit", type=int, default=20)
     dashboard_parser.add_argument("--title", default="Wealth Agents Dashboard")
 
@@ -621,6 +626,7 @@ def main() -> int:
                 runs_dir=args.runs_dir,
                 state_path=args.state_path,
                 output_path=args.output,
+                preflight_dir=(args.preflight_dir or None),
                 limit=args.limit,
                 title=args.title,
             )
