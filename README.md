@@ -40,6 +40,7 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
   - outputs human-readable report in `reports/orders_<YYYY-MM>.md`
 - Phase 4.5 execution safety guardrails:
   - `execute-orders` validates proposal orders against `config/execution_guardrails.yml` before submission
+  - supports `mock` and `ibkr` execution adapters
   - supports per-order limit, total-run limit, max order count, and optional allow-lists
   - applies to direct `execute-orders` and orchestration execution steps (`run-cycle`, `run-scheduler`)
 - Phase 3.7 price fetch enhancements:
@@ -60,7 +61,11 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
   - `python -m wealth_agents policy-review --week 2026-W06 --apply --yes`
   - `python -m wealth_agents propose-orders --month 2026-03`
   - `python -m wealth_agents execute-orders --proposal orders/proposed_2026-03.json --dry-run`
+  - `python -m wealth_agents execute-orders --proposal orders/proposed_2026-03.json --broker ibkr --ibkr-what-if`
   - `python -m wealth_agents ibkr-preflight --ibkr-contracts config/ibkr_contracts.yml`
+  - `python -m wealth_agents broker status --broker ibkr --order-id 7001`
+  - `python -m wealth_agents broker cancel-order --broker ibkr --order-id 7001`
+  - `python -m wealth_agents broker sync-orders --broker ibkr`
   - `python -m wealth_agents fetch-prices --start 2025-01-01 --end 2025-12-31 --prefer-source ibkr --ibkr-contracts config/ibkr_contracts.yml`
 
 ## Setup (uv)
@@ -69,7 +74,7 @@ Phase 1 + Phase 2 implementation for RSS collection, weekly reporting, and an IP
 uv sync --extra dev
 ```
 
-For IBKR price source support:
+For IBKR price source / execution support:
 
 ```bash
 uv sync --extra dev --extra ibkr
@@ -210,6 +215,23 @@ uv run python -m wealth_agents execute-orders \
   --proposal orders/proposed_2026-03.json \
   --dry-run \
   --guardrails config/execution_guardrails.yml
+```
+
+IBKR execution flow:
+
+```bash
+cp config/ibkr_contracts.example.yml config/ibkr_contracts.yml
+uv run python -m wealth_agents ibkr-preflight --ibkr-contracts config/ibkr_contracts.yml
+uv run python -m wealth_agents execute-orders \
+  --proposal orders/proposed_2026-03.json \
+  --broker ibkr \
+  --ibkr-contracts config/ibkr_contracts.yml \
+  --ibkr-what-if
+
+uv run python -m wealth_agents broker status --broker ibkr --order-id 7001
+uv run python -m wealth_agents broker sync-orders --broker ibkr
+# cancel only if needed
+uv run python -m wealth_agents broker cancel-order --broker ibkr --order-id 7001
 ```
 
 Fetch prices with IBKR-first fallback:

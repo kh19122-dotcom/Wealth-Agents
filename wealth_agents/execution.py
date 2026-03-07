@@ -5,11 +5,14 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .broker import BrokerOrderRequest, MockBrokerClient
+from .broker import BrokerClient, BrokerOrderRequest, IbkrBrokerClient, MockBrokerClient
+from .fetch_prices import load_ibkr_contract_specs
 from .policy import read_yaml
 
 
 DEFAULT_GUARDRAILS_PATH = "config/execution_guardrails.yml"
+DEFAULT_IBKR_CONTRACTS_PATH = "config/ibkr_contracts.yml"
+DEFAULT_IBKR_STATE_PATH = "data/broker/ibkr_state.json"
 
 
 def execute_order_proposal(
@@ -20,6 +23,14 @@ def execute_order_proposal(
     output_path: str | None = None,
     guardrails_path: str | None = DEFAULT_GUARDRAILS_PATH,
     enable_guardrails: bool = True,
+    ibkr_contracts_path: str | None = DEFAULT_IBKR_CONTRACTS_PATH,
+    ibkr_host: str = "127.0.0.1",
+    ibkr_port: int = 7497,
+    ibkr_client_id: int = 37,
+    ibkr_timeout_sec: float = 8.0,
+    ibkr_state_path: str = DEFAULT_IBKR_STATE_PATH,
+    ibkr_what_if: bool = False,
+    ibkr_limit_buffer_pct: float = 0.5,
 ) -> dict[str, Any]:
     proposal = _read_proposal(proposal_path)
     month = str(proposal.get("month") or "")
@@ -28,10 +39,21 @@ def execute_order_proposal(
         raise ValueError("orders proposal must contain an orders list.")
 
     broker_name = str(broker or "").strip().lower()
-    if broker_name != "mock":
-        raise ValueError("execute-order currently supports only broker='mock'.")
+    if broker_name not in {"mock", "ibkr"}:
+        raise ValueError("execute-order currently supports broker='mock' or broker='ibkr'.")
 
-    client = None if dry_run else MockBrokerClient(state_path=mock_state_path)
+    ibkr_contracts = load_ibkr_contract_specs(ibkr_contracts_path) if broker_name == "ibkr" else {}
+    client = None if dry_run else _build_broker_client(
+        broker_name=broker_name,
+        mock_state_path=mock_state_path,
+        ibkr_state_path=ibkr_state_path,
+        ibkr_host=ibkr_host,
+        ibkr_port=ibkr_port,
+        ibkr_client_id=ibkr_client_id,
+        ibkr_timeout_sec=ibkr_timeout_sec,
+        ibkr_what_if=ibkr_what_if,
+        ibkr_limit_buffer_pct=ibkr_limit_buffer_pct,
+    )
     submitted: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     prepared_orders: list[dict[str, Any]] = []
@@ -60,19 +82,43 @@ def execute_order_proposal(
 
         isin = str(row.get("isin") or "").strip().upper()
         bucket = str(row.get("bucket") or "").strip()
+        name = str(row.get("name") or "")
+        ticker = str(row.get("ticker") or "").strip()
         client_order_id = f"{month}:{instrument_id}:{idx}"
+        broker_contract = _resolve_broker_contract(
+            broker_name=broker_name,
+            row=row,
+            ticker=ticker,
+            ibkr_contracts=ibkr_contracts,
+        )
+        if broker_name == "ibkr" and not ticker:
+            skipped.append({"index": idx, "reason": "missing ticker for IBKR execution"})
+            continue
+        if broker_name == "ibkr" and not broker_contract:
+            skipped.append(
+                {
+                    "index": idx,
+                    "reason": f"missing IBKR contract mapping for ticker={ticker}",
+                }
+            )
+            continue
+
         request = BrokerOrderRequest(
-            symbol=instrument_id,
+            symbol=(ticker if broker_name == "ibkr" else instrument_id),
             side=side,
             order_type="cash_amount",
             cash_amount_eur=amount_eur,
             currency="EUR",
             client_order_id=client_order_id,
+            broker_contract=broker_contract,
             metadata={
                 "month": month,
+                "instrument_id": instrument_id,
+                "ticker": ticker,
                 "isin": isin,
-                "name": str(row.get("name") or ""),
+                "name": name,
                 "bucket": bucket,
+                "broker_contract": dict(broker_contract or {}),
             },
         )
         prepared_orders.append(
@@ -81,6 +127,7 @@ def execute_order_proposal(
                 "instrument_id": instrument_id,
                 "isin": isin,
                 "bucket": bucket,
+                "ticker": ticker,
                 "amount_eur": amount_eur,
                 "request": request,
             }
@@ -106,39 +153,18 @@ def execute_order_proposal(
         request = order["request"]
         assert isinstance(request, BrokerOrderRequest)
         if dry_run:
-            submitted.append(
-                {
-                    "index": idx,
-                    "client_order_id": request.client_order_id,
-                    "symbol": request.symbol,
-                    "side": request.side,
-                    "order_type": request.order_type,
-                    "cash_amount_eur": request.cash_amount_eur,
-                    "status": "dry_run",
-                }
-            )
+            submitted.append(_build_submitted_row(index=idx, status=None, request=request, dry_run=True))
             continue
 
         assert client is not None
         status = client.submit_order(request)
-        submitted.append(
-            {
-                "index": idx,
-                "order_id": status.order_id,
-                "client_order_id": status.client_order_id,
-                "symbol": status.symbol,
-                "side": status.side,
-                "order_type": status.order_type,
-                "cash_amount_eur": status.cash_amount_eur,
-                "status": status.status,
-                "submitted_at": status.submitted_at,
-            }
-        )
+        submitted.append(_build_submitted_row(index=idx, status=status, request=request, dry_run=False))
 
     payload = {
         "proposal_path": str(Path(proposal_path)),
         "broker": broker_name,
         "dry_run": bool(dry_run),
+        "what_if": bool((not dry_run) and broker_name == "ibkr" and ibkr_what_if),
         "month": month,
         "orders_in_proposal": len(raw_orders),
         "orders_after_validation": len(prepared_orders),
@@ -156,6 +182,249 @@ def execute_order_proposal(
     return payload
 
 
+def get_broker_order_status(
+    order_id: str,
+    *,
+    broker: str = "mock",
+    mock_state_path: str = "data/broker/mock_state.json",
+    ibkr_state_path: str = DEFAULT_IBKR_STATE_PATH,
+    ibkr_host: str = "127.0.0.1",
+    ibkr_port: int = 7497,
+    ibkr_client_id: int = 37,
+    ibkr_timeout_sec: float = 8.0,
+    output_path: str | None = None,
+) -> dict[str, Any]:
+    broker_name = str(broker or "").strip().lower()
+    client = _build_broker_client(
+        broker_name=broker_name,
+        mock_state_path=mock_state_path,
+        ibkr_state_path=ibkr_state_path,
+        ibkr_host=ibkr_host,
+        ibkr_port=ibkr_port,
+        ibkr_client_id=ibkr_client_id,
+        ibkr_timeout_sec=ibkr_timeout_sec,
+        ibkr_what_if=False,
+        ibkr_limit_buffer_pct=0.5,
+    )
+    status = client.get_order(order_id)
+    payload = {
+        "broker": broker_name,
+        "order_id": status.order_id,
+        "client_order_id": status.client_order_id,
+        "symbol": status.symbol,
+        "side": status.side,
+        "order_type": status.order_type,
+        "quantity": status.quantity,
+        "cash_amount_eur": status.cash_amount_eur,
+        "status": status.status,
+        "submitted_at": status.submitted_at,
+        "updated_at": status.updated_at,
+        "metadata": status.metadata,
+    }
+    _write_optional_json(output_path, payload)
+    return payload
+
+
+def cancel_broker_order(
+    order_id: str,
+    *,
+    broker: str = "mock",
+    mock_state_path: str = "data/broker/mock_state.json",
+    ibkr_state_path: str = DEFAULT_IBKR_STATE_PATH,
+    ibkr_host: str = "127.0.0.1",
+    ibkr_port: int = 7497,
+    ibkr_client_id: int = 37,
+    ibkr_timeout_sec: float = 8.0,
+    output_path: str | None = None,
+) -> dict[str, Any]:
+    broker_name = str(broker or "").strip().lower()
+    client = _build_broker_client(
+        broker_name=broker_name,
+        mock_state_path=mock_state_path,
+        ibkr_state_path=ibkr_state_path,
+        ibkr_host=ibkr_host,
+        ibkr_port=ibkr_port,
+        ibkr_client_id=ibkr_client_id,
+        ibkr_timeout_sec=ibkr_timeout_sec,
+        ibkr_what_if=False,
+        ibkr_limit_buffer_pct=0.5,
+    )
+    status = client.cancel_order(order_id)
+    payload = {
+        "broker": broker_name,
+        "order_id": status.order_id,
+        "client_order_id": status.client_order_id,
+        "symbol": status.symbol,
+        "status": status.status,
+        "updated_at": status.updated_at,
+        "metadata": status.metadata,
+    }
+    _write_optional_json(output_path, payload)
+    return payload
+
+
+def sync_broker_orders(
+    *,
+    broker: str = "mock",
+    order_ids: list[str] | None = None,
+    mock_state_path: str = "data/broker/mock_state.json",
+    ibkr_state_path: str = DEFAULT_IBKR_STATE_PATH,
+    ibkr_host: str = "127.0.0.1",
+    ibkr_port: int = 7497,
+    ibkr_client_id: int = 37,
+    ibkr_timeout_sec: float = 8.0,
+    output_path: str | None = None,
+) -> dict[str, Any]:
+    broker_name = str(broker or "").strip().lower()
+    selected_order_ids = [str(row).strip() for row in (order_ids or []) if str(row).strip()]
+    if not selected_order_ids:
+        selected_order_ids = _load_order_ids_from_state(
+            broker_name=broker_name,
+            mock_state_path=mock_state_path,
+            ibkr_state_path=ibkr_state_path,
+        )
+    if not selected_order_ids:
+        raise ValueError(f"No tracked orders found for broker='{broker_name}'.")
+
+    client = _build_broker_client(
+        broker_name=broker_name,
+        mock_state_path=mock_state_path,
+        ibkr_state_path=ibkr_state_path,
+        ibkr_host=ibkr_host,
+        ibkr_port=ibkr_port,
+        ibkr_client_id=ibkr_client_id,
+        ibkr_timeout_sec=ibkr_timeout_sec,
+        ibkr_what_if=False,
+        ibkr_limit_buffer_pct=0.5,
+    )
+
+    refreshed: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for order_id in selected_order_ids:
+        try:
+            status = client.get_order(order_id)
+        except Exception as exc:
+            failed.append({"order_id": order_id, "error": str(exc)})
+            continue
+        refreshed.append(
+            {
+                "order_id": status.order_id,
+                "client_order_id": status.client_order_id,
+                "symbol": status.symbol,
+                "status": status.status,
+                "updated_at": status.updated_at,
+            }
+        )
+
+    payload = {
+        "broker": broker_name,
+        "requested_order_ids": selected_order_ids,
+        "refreshed_count": len(refreshed),
+        "failed_count": len(failed),
+        "orders": refreshed,
+        "failed": failed,
+        "synced_at": _now_iso8601(),
+    }
+    _write_optional_json(output_path, payload)
+    return payload
+
+
+def _build_broker_client(
+    *,
+    broker_name: str,
+    mock_state_path: str,
+    ibkr_state_path: str,
+    ibkr_host: str,
+    ibkr_port: int,
+    ibkr_client_id: int,
+    ibkr_timeout_sec: float,
+    ibkr_what_if: bool,
+    ibkr_limit_buffer_pct: float,
+) -> BrokerClient:
+    if broker_name == "mock":
+        return MockBrokerClient(state_path=mock_state_path)
+    if broker_name == "ibkr":
+        return IbkrBrokerClient(
+            state_path=ibkr_state_path,
+            host=ibkr_host,
+            port=ibkr_port,
+            client_id=ibkr_client_id,
+            timeout_sec=ibkr_timeout_sec,
+            what_if=ibkr_what_if,
+            limit_buffer_pct=ibkr_limit_buffer_pct,
+        )
+    raise ValueError(f"Unsupported broker '{broker_name}'.")
+
+
+def _resolve_broker_contract(
+    *,
+    broker_name: str,
+    row: dict[str, Any],
+    ticker: str,
+    ibkr_contracts: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    if broker_name != "ibkr":
+        return None
+    raw_contract = row.get("broker_contract")
+    if isinstance(raw_contract, dict):
+        return dict(raw_contract)
+    if ticker:
+        spec = ibkr_contracts.get(ticker)
+        if isinstance(spec, dict):
+            return dict(spec)
+    return None
+
+
+def _build_submitted_row(
+    *,
+    index: int,
+    status,
+    request: BrokerOrderRequest,
+    dry_run: bool,
+) -> dict[str, Any]:
+    if dry_run:
+        row = {
+            "index": index,
+            "client_order_id": request.client_order_id,
+            "symbol": request.symbol,
+            "side": request.side,
+            "order_type": request.order_type,
+            "cash_amount_eur": request.cash_amount_eur,
+            "status": "dry_run",
+        }
+        metadata = request.metadata or {}
+    else:
+        assert status is not None
+        row = {
+            "index": index,
+            "order_id": status.order_id,
+            "client_order_id": status.client_order_id,
+            "symbol": status.symbol,
+            "side": status.side,
+            "order_type": status.order_type,
+            "cash_amount_eur": status.cash_amount_eur,
+            "quantity": status.quantity,
+            "status": status.status,
+            "submitted_at": status.submitted_at,
+        }
+        metadata = status.metadata or {}
+
+    ticker = str(metadata.get("ticker") or "").strip()
+    if ticker:
+        row["ticker"] = ticker
+    contract = metadata.get("broker_contract") or metadata.get("contract")
+    if isinstance(contract, dict) and contract:
+        row["contract"] = dict(contract)
+    for field_name in ("trade_currency", "request_currency", "limit_price", "quote_price", "fx_rate"):
+        value = metadata.get(field_name)
+        if value is not None and value != "":
+            row[field_name] = value
+    what_if = metadata.get("what_if")
+    if isinstance(what_if, dict) and what_if:
+        row["what_if"] = what_if
+    return row
+
+
 def _read_proposal(path: str) -> dict[str, Any]:
     proposal_path = Path(path)
     if not proposal_path.exists():
@@ -167,6 +436,35 @@ def _read_proposal(path: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("orders proposal payload must be a JSON object.")
     return payload
+
+
+def _load_order_ids_from_state(*, broker_name: str, mock_state_path: str, ibkr_state_path: str) -> list[str]:
+    if broker_name == "mock":
+        path = Path(mock_state_path)
+    elif broker_name == "ibkr":
+        path = Path(ibkr_state_path)
+    else:
+        raise ValueError(f"Unsupported broker '{broker_name}'.")
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid broker state JSON: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid broker state JSON: {path}")
+    raw_orders = payload.get("orders") or {}
+    if not isinstance(raw_orders, dict):
+        raise ValueError(f"Invalid broker state JSON: {path}")
+    return sorted(str(order_id).strip() for order_id in raw_orders if str(order_id).strip())
+
+
+def _write_optional_json(path: str | None, payload: dict[str, Any]) -> None:
+    if not path:
+        return
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def load_execution_guardrails(path: str | None, enabled: bool = True) -> dict[str, Any]:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .dashboard import build_dashboard
 from .feed_health import format_health_table, load_feed_health
-from .execution import execute_order_proposal
+from .execution import cancel_broker_order, execute_order_proposal, get_broker_order_status, sync_broker_orders
 from .fetch_prices import fetch_prices_for_policy
 from .ingest import ingest_manual_inputs
 from .ibkr_preflight import run_ibkr_preflight
@@ -138,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     execute_orders.add_argument(
         "--broker",
         default="mock",
-        help="Broker adapter name (currently: mock)",
+        help="Broker adapter name (currently: mock, ibkr)",
     )
     execute_orders.add_argument(
         "--mock-state",
@@ -156,6 +156,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional execution result JSON output path",
     )
     execute_orders.add_argument(
+        "--ibkr-contracts",
+        default="config/ibkr_contracts.yml",
+        help="IBKR contract mapping YAML path (default: config/ibkr_contracts.yml)",
+    )
+    execute_orders.add_argument(
+        "--ibkr-state",
+        default="data/broker/ibkr_state.json",
+        help="IBKR execution state JSON path (default: data/broker/ibkr_state.json)",
+    )
+    execute_orders.add_argument("--ibkr-host", default="127.0.0.1", help="IBKR TWS/Gateway host")
+    execute_orders.add_argument("--ibkr-port", type=int, default=7497, help="IBKR TWS/Gateway port")
+    execute_orders.add_argument("--ibkr-client-id", type=int, default=37, help="IBKR API client id")
+    execute_orders.add_argument(
+        "--ibkr-timeout-sec",
+        type=float,
+        default=8.0,
+        help="IBKR API connect timeout in seconds",
+    )
+    execute_orders.add_argument(
+        "--ibkr-what-if",
+        action="store_true",
+        help="Run IBKR what-if order checks instead of submitting live orders.",
+    )
+    execute_orders.add_argument(
+        "--ibkr-limit-buffer-pct",
+        type=float,
+        default=0.5,
+        help="BUY limit-price buffer above snapshot quote in percent (default: 0.5)",
+    )
+    execute_orders.add_argument(
         "--guardrails",
         default="config/execution_guardrails.yml",
         help="Execution guardrails YAML path (default: config/execution_guardrails.yml)",
@@ -165,6 +195,47 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable execution guardrails for this run.",
     )
+
+    broker_parser = sub.add_parser("broker", help="Broker account/order maintenance commands")
+    broker_sub = broker_parser.add_subparsers(dest="broker_command", required=True)
+
+    broker_status = broker_sub.add_parser("status", help="Fetch and reconcile one broker order status")
+    broker_status.add_argument("--broker", default="mock", help="Broker adapter name (currently: mock, ibkr)")
+    broker_status.add_argument("--order-id", required=True, help="Broker order id or client_order_id")
+    broker_status.add_argument("--mock-state", default="data/broker/mock_state.json")
+    broker_status.add_argument("--ibkr-state", default="data/broker/ibkr_state.json")
+    broker_status.add_argument("--ibkr-host", default="127.0.0.1", help="IBKR TWS/Gateway host")
+    broker_status.add_argument("--ibkr-port", type=int, default=7497, help="IBKR TWS/Gateway port")
+    broker_status.add_argument("--ibkr-client-id", type=int, default=37, help="IBKR API client id")
+    broker_status.add_argument("--ibkr-timeout-sec", type=float, default=8.0, help="IBKR API connect timeout in seconds")
+    broker_status.add_argument("--output", default=None, help="Optional JSON output path")
+
+    broker_cancel = broker_sub.add_parser("cancel-order", help="Cancel one broker order")
+    broker_cancel.add_argument("--broker", default="mock", help="Broker adapter name (currently: mock, ibkr)")
+    broker_cancel.add_argument("--order-id", required=True, help="Broker order id or client_order_id")
+    broker_cancel.add_argument("--mock-state", default="data/broker/mock_state.json")
+    broker_cancel.add_argument("--ibkr-state", default="data/broker/ibkr_state.json")
+    broker_cancel.add_argument("--ibkr-host", default="127.0.0.1", help="IBKR TWS/Gateway host")
+    broker_cancel.add_argument("--ibkr-port", type=int, default=7497, help="IBKR TWS/Gateway port")
+    broker_cancel.add_argument("--ibkr-client-id", type=int, default=37, help="IBKR API client id")
+    broker_cancel.add_argument("--ibkr-timeout-sec", type=float, default=8.0, help="IBKR API connect timeout in seconds")
+    broker_cancel.add_argument("--output", default=None, help="Optional JSON output path")
+
+    broker_sync = broker_sub.add_parser("sync-orders", help="Refresh tracked broker orders from local state")
+    broker_sync.add_argument("--broker", default="mock", help="Broker adapter name (currently: mock, ibkr)")
+    broker_sync.add_argument(
+        "--order-id",
+        action="append",
+        default=None,
+        help="Optional specific order id/client_order_id to refresh (repeatable)",
+    )
+    broker_sync.add_argument("--mock-state", default="data/broker/mock_state.json")
+    broker_sync.add_argument("--ibkr-state", default="data/broker/ibkr_state.json")
+    broker_sync.add_argument("--ibkr-host", default="127.0.0.1", help="IBKR TWS/Gateway host")
+    broker_sync.add_argument("--ibkr-port", type=int, default=7497, help="IBKR TWS/Gateway port")
+    broker_sync.add_argument("--ibkr-client-id", type=int, default=37, help="IBKR API client id")
+    broker_sync.add_argument("--ibkr-timeout-sec", type=float, default=8.0, help="IBKR API connect timeout in seconds")
+    broker_sync.add_argument("--output", default=None, help="Optional JSON output path")
 
     run_cycle_parser = sub.add_parser("run-cycle", help="Run Phase 1->4 orchestration cycle with checkpoints")
     run_cycle_parser.add_argument("--cycle-id", default=None, help="Optional cycle identifier")
@@ -194,6 +265,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--execute-submit",
         action="store_true",
         help="Submit broker orders (default is dry-run execution).",
+    )
+    run_cycle_parser.add_argument(
+        "--execute-ibkr-contracts",
+        default="config/ibkr_contracts.yml",
+        help="IBKR contract mapping YAML path for execution (default: config/ibkr_contracts.yml)",
+    )
+    run_cycle_parser.add_argument("--execute-ibkr-host", default="127.0.0.1", help="IBKR TWS/Gateway host")
+    run_cycle_parser.add_argument("--execute-ibkr-port", type=int, default=7497, help="IBKR TWS/Gateway port")
+    run_cycle_parser.add_argument("--execute-ibkr-client-id", type=int, default=37, help="IBKR API client id")
+    run_cycle_parser.add_argument(
+        "--execute-ibkr-timeout-sec",
+        type=float,
+        default=8.0,
+        help="IBKR API connect timeout in seconds",
+    )
+    run_cycle_parser.add_argument(
+        "--execute-ibkr-what-if",
+        action="store_true",
+        help="Use IBKR what-if checks during execution instead of live submission.",
+    )
+    run_cycle_parser.add_argument(
+        "--execute-ibkr-limit-buffer-pct",
+        type=float,
+        default=0.5,
+        help="BUY limit-price buffer above snapshot quote in percent (default: 0.5)",
     )
     run_cycle_parser.add_argument(
         "--execution-guardrails",
@@ -259,6 +355,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--execute-submit",
         action="store_true",
         help="Submit broker orders (default is dry-run execution).",
+    )
+    run_scheduler_parser.add_argument(
+        "--execute-ibkr-contracts",
+        default="config/ibkr_contracts.yml",
+        help="IBKR contract mapping YAML path for execution (default: config/ibkr_contracts.yml)",
+    )
+    run_scheduler_parser.add_argument("--execute-ibkr-host", default="127.0.0.1", help="IBKR TWS/Gateway host")
+    run_scheduler_parser.add_argument("--execute-ibkr-port", type=int, default=7497, help="IBKR TWS/Gateway port")
+    run_scheduler_parser.add_argument("--execute-ibkr-client-id", type=int, default=37, help="IBKR API client id")
+    run_scheduler_parser.add_argument(
+        "--execute-ibkr-timeout-sec",
+        type=float,
+        default=8.0,
+        help="IBKR API connect timeout in seconds",
+    )
+    run_scheduler_parser.add_argument(
+        "--execute-ibkr-what-if",
+        action="store_true",
+        help="Use IBKR what-if checks during execution instead of live submission.",
+    )
+    run_scheduler_parser.add_argument(
+        "--execute-ibkr-limit-buffer-pct",
+        type=float,
+        default=0.5,
+        help="BUY limit-price buffer above snapshot quote in percent (default: 0.5)",
     )
     run_scheduler_parser.add_argument(
         "--execution-guardrails",
@@ -595,10 +716,18 @@ def main() -> int:
                 proposal_path=args.proposal,
                 broker=args.broker,
                 mock_state_path=args.mock_state,
+                ibkr_state_path=args.ibkr_state,
                 dry_run=args.dry_run,
                 output_path=args.output,
                 guardrails_path=args.guardrails,
                 enable_guardrails=(not args.no_guardrails),
+                ibkr_contracts_path=args.ibkr_contracts,
+                ibkr_host=args.ibkr_host,
+                ibkr_port=args.ibkr_port,
+                ibkr_client_id=args.ibkr_client_id,
+                ibkr_timeout_sec=args.ibkr_timeout_sec,
+                ibkr_what_if=args.ibkr_what_if,
+                ibkr_limit_buffer_pct=args.ibkr_limit_buffer_pct,
             )
             logging.getLogger(__name__).info(
                 "Order execution complete: broker=%s dry_run=%s submitted=%s skipped=%s",
@@ -608,6 +737,65 @@ def main() -> int:
                 result["skipped_count"],
             )
             return 0
+
+        if args.command == "broker":
+            if args.broker_command == "status":
+                result = get_broker_order_status(
+                    order_id=args.order_id,
+                    broker=args.broker,
+                    mock_state_path=args.mock_state,
+                    ibkr_state_path=args.ibkr_state,
+                    ibkr_host=args.ibkr_host,
+                    ibkr_port=args.ibkr_port,
+                    ibkr_client_id=args.ibkr_client_id,
+                    ibkr_timeout_sec=args.ibkr_timeout_sec,
+                    output_path=args.output,
+                )
+                logging.getLogger(__name__).info(
+                    "Broker order status: broker=%s order_id=%s status=%s",
+                    result["broker"],
+                    result["order_id"],
+                    result["status"],
+                )
+                return 0
+            if args.broker_command == "cancel-order":
+                result = cancel_broker_order(
+                    order_id=args.order_id,
+                    broker=args.broker,
+                    mock_state_path=args.mock_state,
+                    ibkr_state_path=args.ibkr_state,
+                    ibkr_host=args.ibkr_host,
+                    ibkr_port=args.ibkr_port,
+                    ibkr_client_id=args.ibkr_client_id,
+                    ibkr_timeout_sec=args.ibkr_timeout_sec,
+                    output_path=args.output,
+                )
+                logging.getLogger(__name__).info(
+                    "Broker order canceled: broker=%s order_id=%s status=%s",
+                    result["broker"],
+                    result["order_id"],
+                    result["status"],
+                )
+                return 0
+            if args.broker_command == "sync-orders":
+                result = sync_broker_orders(
+                    broker=args.broker,
+                    order_ids=args.order_id,
+                    mock_state_path=args.mock_state,
+                    ibkr_state_path=args.ibkr_state,
+                    ibkr_host=args.ibkr_host,
+                    ibkr_port=args.ibkr_port,
+                    ibkr_client_id=args.ibkr_client_id,
+                    ibkr_timeout_sec=args.ibkr_timeout_sec,
+                    output_path=args.output,
+                )
+                logging.getLogger(__name__).info(
+                    "Broker order sync: broker=%s refreshed=%s failed=%s",
+                    result["broker"],
+                    result["refreshed_count"],
+                    result["failed_count"],
+                )
+                return 0
 
         if args.command == "run-cycle":
             result = run_cycle(
@@ -632,6 +820,13 @@ def main() -> int:
                 execute_dry_run=(not args.execute_submit),
                 execution_guardrails_path=args.execution_guardrails,
                 enable_execution_guardrails=(not args.no_execution_guardrails),
+                execute_ibkr_contracts_path=args.execute_ibkr_contracts,
+                execute_ibkr_host=args.execute_ibkr_host,
+                execute_ibkr_port=args.execute_ibkr_port,
+                execute_ibkr_client_id=args.execute_ibkr_client_id,
+                execute_ibkr_timeout_sec=args.execute_ibkr_timeout_sec,
+                execute_ibkr_what_if=args.execute_ibkr_what_if,
+                execute_ibkr_limit_buffer_pct=args.execute_ibkr_limit_buffer_pct,
                 skip_execution=args.skip_execution,
                 resume=args.resume,
             )
@@ -668,6 +863,13 @@ def main() -> int:
                 "execute_dry_run": (not args.execute_submit),
                 "execution_guardrails_path": args.execution_guardrails,
                 "enable_execution_guardrails": (not args.no_execution_guardrails),
+                "execute_ibkr_contracts_path": args.execute_ibkr_contracts,
+                "execute_ibkr_host": args.execute_ibkr_host,
+                "execute_ibkr_port": args.execute_ibkr_port,
+                "execute_ibkr_client_id": args.execute_ibkr_client_id,
+                "execute_ibkr_timeout_sec": args.execute_ibkr_timeout_sec,
+                "execute_ibkr_what_if": args.execute_ibkr_what_if,
+                "execute_ibkr_limit_buffer_pct": args.execute_ibkr_limit_buffer_pct,
                 "skip_execution": args.skip_execution,
                 "resume": args.resume,
                 "force": args.force,

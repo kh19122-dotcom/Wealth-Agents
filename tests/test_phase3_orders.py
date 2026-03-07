@@ -59,12 +59,14 @@ def _write_policy(path: Path) -> None:
                         "isin": "IE00B5BMR087",
                         "name": "iShares Core S&P 500 UCITS ETF (Acc)",
                         "weight_within_bucket": 0.70,
+                        "data": {"provider": "yahoo", "ticker": "CSPX.L"},
                     },
                     {
                         "id": "ex_us_equity",
                         "isin": "TBD_EXUS",
                         "name": "Ex-US Equity placeholder",
                         "weight_within_bucket": 0.30,
+                        "data": {"provider": "yahoo", "ticker": "EIMI.L"},
                     },
                 ],
                 "bonds_cashlike": [
@@ -73,6 +75,7 @@ def _write_policy(path: Path) -> None:
                         "isin": "LU0290358497",
                         "name": "Xtrackers II EUR Overnight Rate Swap UCITS ETF (XEON)",
                         "weight_within_bucket": 1.0,
+                        "data": {"provider": "yahoo", "ticker": "XEON.DE"},
                     }
                 ],
                 "optional_gold": [
@@ -81,6 +84,7 @@ def _write_policy(path: Path) -> None:
                         "isin": "DE000A0S9GB0",
                         "name": "Xetra-Gold",
                         "weight_within_bucket": 1.0,
+                        "data": {"provider": "yahoo", "ticker": "4GLD.DE"},
                     }
                 ],
             },
@@ -132,6 +136,12 @@ def test_propose_monthly_orders_smoke_deterministic_allocation(tmp_path: Path):
     assert sum(order["amount_eur"] for order in persisted["orders"]) == 2500
     assert all(order["side"] == "BUY" for order in persisted["orders"])
     assert all("instrument_id" in order for order in persisted["orders"])
+    assert {order["instrument_id"]: order.get("ticker") for order in persisted["orders"]} == {
+        "sp500_acc": "CSPX.L",
+        "ex_us_equity": "EIMI.L",
+        "xeon": "XEON.DE",
+        "xetra_gold": "4GLD.DE",
+    }
 
     amounts_by_isin = {order["isin"]: order["amount_eur"] for order in persisted["orders"]}
     assert amounts_by_isin["IE00B5BMR087"] == 1050
