@@ -24,6 +24,7 @@ class InstrumentAllocation:
     instrument_id: str
     isin: str
     name: str
+    ticker: str | None
     effective_weight: float
     amount_raw: float
     amount_eur: int
@@ -363,6 +364,7 @@ def _read_instruments(
                     "isin": isin,
                     "name": name,
                     "raw_weight": raw_weight,
+                    "ticker": _read_ticker_from_instrument(item),
                 }
             )
 
@@ -375,6 +377,7 @@ def _read_instruments(
                 "isin": row["isin"],
                 "name": row["name"],
                 "weight": row["raw_weight"] / total_weight,
+                "ticker": row.get("ticker"),
             }
             for row in bucket_entries
         ]
@@ -432,6 +435,7 @@ def _build_allocations(
                     instrument_id=str(item["id"]),
                     isin=str(item["isin"]),
                     name=str(item["name"]),
+                    ticker=_as_optional_string(item.get("ticker")),
                     effective_weight=effective_weight,
                     amount_raw=raw_amount,
                     amount_eur=_round_half_up(raw_amount),
@@ -539,6 +543,8 @@ def _build_orders(allocations: list[InstrumentAllocation]) -> list[dict[str, Any
                 "amount_eur": item.amount_eur,
             }
         )
+        if item.ticker:
+            orders[-1]["ticker"] = item.ticker
     return orders
 
 
@@ -601,6 +607,19 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rendered = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     path.write_text(rendered, encoding="utf-8")
+
+
+def _read_ticker_from_instrument(item: dict[str, Any]) -> str | None:
+    data = item.get("data")
+    if not isinstance(data, dict):
+        return None
+    ticker = str(data.get("ticker") or "").strip()
+    return ticker or None
+
+
+def _as_optional_string(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _write_report(

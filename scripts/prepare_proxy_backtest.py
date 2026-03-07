@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Iterable
@@ -12,9 +12,17 @@ from urllib.request import Request, urlopen
 
 import yaml
 
+from wealth_agents.policy import stable_policy_hash
+
 
 STOOQ_DAILY_URL = "https://stooq.com/q/d/l/?s={symbol}&i=d"
 USER_AGENT = "Mozilla/5.0 (compatible; WealthAgents/1.0; +https://example.invalid)"
+PROXY_PRICES_NAMESPACE = "proxy_stooq"
+SIMULATION_SCENARIOS: tuple[tuple[str, int], ...] = (
+    ("2y", 24),
+    ("5y", 60),
+    ("10y", 120),
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +33,16 @@ class ProxyInstrument:
     name: str
     ticker: str
     stooq_symbol: str
+
+
+@dataclass(frozen=True)
+class SimulationExample:
+    label: str
+    start_month: str
+    end_month: str
+    sim_dir_name: str
+    reports_dir_name: str
+    clipped: bool
 
 
 PROXY_INSTRUMENTS: tuple[ProxyInstrument, ...] = (
@@ -67,7 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prices-dir",
         default="/tmp/wa_prices_proxy",
-        help="Output prices root directory (default: /tmp/wa_prices_proxy)",
+        help=(
+            "Base output directory. Proxy caches are always written under "
+            "<prices-dir>/proxy_stooq unless already namespaced "
+            "(default: /tmp/wa_prices_proxy)"
+        ),
     )
     parser.add_argument(
         "--policy-output",
@@ -84,7 +106,7 @@ def main() -> int:
     if start > end:
         raise ValueError("start must be less than or equal to end.")
 
-    prices_root = Path(args.prices_dir)
+    prices_root = _resolve_proxy_prices_root(Path(args.prices_dir))
     prices_yahoo_dir = prices_root / "yahoo"
     prices_yahoo_dir.mkdir(parents=True, exist_ok=True)
 
@@ -111,8 +133,9 @@ def main() -> int:
 
     policy_path = Path(args.policy_output)
     policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_doc = _build_proxy_policy_doc(created_at=_now_iso8601())
     policy_path.write_text(
-        yaml.safe_dump(_build_proxy_policy_doc(), sort_keys=False, allow_unicode=False),
+        yaml.safe_dump(policy_doc, sort_keys=False, allow_unicode=False),
         encoding="utf-8",
     )
 
@@ -127,27 +150,20 @@ def main() -> int:
 
     print("")
     print("Next commands:")
-    print(
-        "  uv run python -m wealth_agents simulate "
-        "--start 2024-03 --end 2026-02 --monthly 2500 --initial 0 "
-        "--allow-short-history "
-        f"--policy {policy_path} --prices-dir {prices_root} "
-        "--sim-dir /tmp/wa_backtest_proxy/sim_2y --reports-dir /tmp/wa_backtest_proxy/reports_2y"
-    )
-    print(
-        "  uv run python -m wealth_agents simulate "
-        "--start 2021-03 --end 2026-02 --monthly 2500 --initial 0 "
-        "--allow-short-history "
-        f"--policy {policy_path} --prices-dir {prices_root} "
-        "--sim-dir /tmp/wa_backtest_proxy/sim_5y --reports-dir /tmp/wa_backtest_proxy/reports_5y"
-    )
-    print(
-        "  uv run python -m wealth_agents simulate "
-        "--start 2016-03 --end 2026-02 --monthly 2500 --initial 0 "
-        "--allow-short-history "
-        f"--policy {policy_path} --prices-dir {prices_root} "
-        "--sim-dir /tmp/wa_backtest_proxy/sim_10y --reports-dir /tmp/wa_backtest_proxy/reports_10y"
-    )
+    examples = _build_simulation_examples(start=start, end=end)
+    if not examples:
+        print("  No full-month simulation window fits inside the requested start/end dates.")
+        return 0
+    for example in examples:
+        label = example.label if not example.clipped else f"{example.label} clipped"
+        print(
+            f"  [{label}] uv run python -m wealth_agents simulate "
+            f"--start {example.start_month} --end {example.end_month} "
+            "--monthly 2500 --initial 0 "
+            f"--policy {policy_path} --prices-dir {prices_root} "
+            f"--sim-dir /tmp/wa_backtest_proxy/{example.sim_dir_name} "
+            f"--reports-dir /tmp/wa_backtest_proxy/{example.reports_dir_name}"
+        )
     return 0
 
 
@@ -199,6 +215,73 @@ def _fetch_stooq_daily_close(symbol: str) -> list[tuple[date, float]]:
     return out
 
 
+def _resolve_proxy_prices_root(path: Path) -> Path:
+    if path.name == PROXY_PRICES_NAMESPACE:
+        return path
+    return path / PROXY_PRICES_NAMESPACE
+
+
+def _now_iso8601() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _calendar_month_end(dt: date) -> date:
+    month_start = dt.replace(day=1)
+    if month_start.month == 12:
+        next_month = month_start.replace(year=month_start.year + 1, month=1, day=1)
+    else:
+        next_month = month_start.replace(month=month_start.month + 1, day=1)
+    return next_month - date.resolution
+
+
+def _add_months(month_start: date, delta_months: int) -> date:
+    zero_based_month = (month_start.month - 1) + int(delta_months)
+    year = month_start.year + (zero_based_month // 12)
+    month = (zero_based_month % 12) + 1
+    return month_start.replace(year=year, month=month, day=1)
+
+
+def _full_month_window(start: date, end: date) -> tuple[str, str] | None:
+    start_month = start.replace(day=1)
+    if start != start_month:
+        start_month = _add_months(start_month, 1)
+
+    end_month = end.replace(day=1)
+    if end != _calendar_month_end(end):
+        end_month = _add_months(end_month, -1)
+
+    if start_month > end_month:
+        return None
+    return start_month.strftime("%Y-%m"), end_month.strftime("%Y-%m")
+
+
+def _build_simulation_examples(start: date, end: date) -> list[SimulationExample]:
+    month_window = _full_month_window(start, end)
+    if month_window is None:
+        return []
+
+    available_start, available_end = month_window
+    available_start_month = datetime.strptime(available_start, "%Y-%m").date().replace(day=1)
+    available_end_month = datetime.strptime(available_end, "%Y-%m").date().replace(day=1)
+
+    out: list[SimulationExample] = []
+    for label, span_months in SIMULATION_SCENARIOS:
+        target_start = _add_months(available_end_month, -(span_months - 1))
+        clipped = target_start < available_start_month
+        scenario_start = max(target_start, available_start_month)
+        out.append(
+            SimulationExample(
+                label=label,
+                start_month=scenario_start.strftime("%Y-%m"),
+                end_month=available_end_month.strftime("%Y-%m"),
+                sim_dir_name=f"sim_{label}",
+                reports_dir_name=f"reports_{label}",
+                clipped=clipped,
+            )
+        )
+    return out
+
+
 def _write_price_cache_csv(path: Path, rows: Iterable[tuple[date, float]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -208,7 +291,7 @@ def _write_price_cache_csv(path: Path, rows: Iterable[tuple[date, float]]) -> No
             writer.writerow([dt.isoformat(), f"{float(px):.10f}"])
 
 
-def _build_proxy_policy_doc() -> dict:
+def _build_proxy_policy_doc(created_at: str) -> dict:
     by_bucket: dict[str, list[dict]] = {
         "global_equity": [],
         "bonds_cashlike": [],
@@ -224,41 +307,51 @@ def _build_proxy_policy_doc() -> dict:
                 "data": {
                     "provider": "yahoo",
                     "ticker": instrument.ticker,
-                    # Keep simulation FX-neutral to avoid Yahoo FX dependency.
-                    "currency": "EUR",
                 },
             }
         )
 
-    return {
+    policy = {
+        "target_allocation": [
+            {"bucket": "global_equity", "pct": 60},
+            {"bucket": "bonds_cashlike", "pct": 35},
+            {"bucket": "optional_gold", "pct": 5},
+        ],
+        "instruments": by_bucket,
+        "rebalance_rules": {"frequency": "quarterly", "band_pct": 5.0, "buy_only": True},
+        "guardrails": {"max_single_asset_pct": 80, "min_trade_eur": 50},
+        "notes": {
+            "instrument_source": "proxy_stooq_v1",
+            "price_cache_namespace": PROXY_PRICES_NAMESPACE,
+            "proxy_notice": (
+                "This policy uses US-listed proxy ETFs from Stooq daily close data. "
+                "Use for strategy stress/backtest only."
+            ),
+            "fx_notice": (
+                "Underlying ETFs are USD-priced proxies. "
+                "Simulation applies EUR FX conversion when Yahoo FX data is available."
+            ),
+        },
+    }
+    doc = {
         "policy_version": "proxy-backtest",
-        "created_at": "2026-02-28T00:00:00Z",
-        "policy_hash": "proxy_backtest_stooq_v1",
+        "created_at": created_at,
         "selected_candidate": "balanced",
         "inputs_snapshot": {
             "base_currency": "EUR",
             "risk_tolerance": "medium",
             "horizon_years": 10,
         },
-        "policy": {
-            "target_allocation": [
-                {"bucket": "global_equity", "pct": 60},
-                {"bucket": "bonds_cashlike", "pct": 35},
-                {"bucket": "optional_gold", "pct": 5},
-            ],
-            "instruments": by_bucket,
-            "rebalance_rules": {"frequency": "quarterly", "band_pct": 5.0, "buy_only": False},
-            "guardrails": {"max_single_asset_pct": 80, "min_trade_eur": 50},
-            "notes": {
-                "instrument_source": "proxy_stooq_v1",
-                "proxy_notice": (
-                    "This policy uses US-listed proxy ETFs from Stooq daily close data. "
-                    "Use for strategy stress/backtest only."
-                ),
-                "fx_notice": "Prices are treated as EUR (FX-neutral approximation).",
-            },
-        },
+        "policy": policy,
     }
+    doc["policy_hash"] = stable_policy_hash(
+        {
+            "selected_candidate": doc["selected_candidate"],
+            "inputs_snapshot": doc["inputs_snapshot"],
+            "policy": policy,
+        }
+    )
+    return doc
 
 
 if __name__ == "__main__":

@@ -23,6 +23,12 @@ DEFAULT_IPS_INPUT_PATH = "data/policy/ips_inputs.yml"
 DEFAULT_PRICES_DIR = "data/prices"
 DEFAULT_EXECUTE_BROKER = "mock"
 DEFAULT_EXECUTION_GUARDRAILS_PATH = "config/execution_guardrails.yml"
+DEFAULT_EXECUTE_IBKR_CONTRACTS_PATH = "config/ibkr_contracts.yml"
+DEFAULT_EXECUTE_IBKR_HOST = "127.0.0.1"
+DEFAULT_EXECUTE_IBKR_PORT = 7497
+DEFAULT_EXECUTE_IBKR_CLIENT_ID = 37
+DEFAULT_EXECUTE_IBKR_TIMEOUT_SEC = 8.0
+DEFAULT_EXECUTE_IBKR_LIMIT_BUFFER_PCT = 0.5
 DEFAULT_QUALITY_GATE_PROFILE = "off"
 QUALITY_GATE_PROFILES: dict[str, dict[str, Any]] = {
     "off": {
@@ -94,6 +100,13 @@ def run_cycle(
     execute_dry_run: bool = True,
     execution_guardrails_path: str = DEFAULT_EXECUTION_GUARDRAILS_PATH,
     enable_execution_guardrails: bool = True,
+    execute_ibkr_contracts_path: str = DEFAULT_EXECUTE_IBKR_CONTRACTS_PATH,
+    execute_ibkr_host: str = DEFAULT_EXECUTE_IBKR_HOST,
+    execute_ibkr_port: int = DEFAULT_EXECUTE_IBKR_PORT,
+    execute_ibkr_client_id: int = DEFAULT_EXECUTE_IBKR_CLIENT_ID,
+    execute_ibkr_timeout_sec: float = DEFAULT_EXECUTE_IBKR_TIMEOUT_SEC,
+    execute_ibkr_what_if: bool = False,
+    execute_ibkr_limit_buffer_pct: float = DEFAULT_EXECUTE_IBKR_LIMIT_BUFFER_PCT,
     skip_execution: bool = False,
     resume: bool = False,
     quality_gate_profile: str = DEFAULT_QUALITY_GATE_PROFILE,
@@ -276,12 +289,19 @@ def run_cycle(
                 proposal_path=Path(str(propose_out["orders_path"])),
                 execute_broker=execute_broker,
                 execute_dry_run=execute_dry_run,
-                execution_guardrails_path=execution_guardrails_path,
-                enable_execution_guardrails=enable_execution_guardrails,
-                root=root,
-                output_path=execution_output_path,
-            ),
-        )
+            execution_guardrails_path=execution_guardrails_path,
+            enable_execution_guardrails=enable_execution_guardrails,
+            execute_ibkr_contracts_path=execute_ibkr_contracts_path,
+            execute_ibkr_host=execute_ibkr_host,
+            execute_ibkr_port=execute_ibkr_port,
+            execute_ibkr_client_id=execute_ibkr_client_id,
+            execute_ibkr_timeout_sec=execute_ibkr_timeout_sec,
+            execute_ibkr_what_if=execute_ibkr_what_if,
+            execute_ibkr_limit_buffer_pct=execute_ibkr_limit_buffer_pct,
+            root=root,
+            output_path=execution_output_path,
+        ),
+    )
         artifacts["execution_result_path"] = execute_out.get("output_path")
 
     checkpoint["status"] = "completed"
@@ -465,6 +485,13 @@ def _run_execute_orders(
     execute_dry_run: bool,
     execution_guardrails_path: str,
     enable_execution_guardrails: bool,
+    execute_ibkr_contracts_path: str,
+    execute_ibkr_host: str,
+    execute_ibkr_port: int,
+    execute_ibkr_client_id: int,
+    execute_ibkr_timeout_sec: float,
+    execute_ibkr_what_if: bool,
+    execute_ibkr_limit_buffer_pct: float,
     root: Path,
     output_path: Path,
 ) -> dict[str, Any]:
@@ -472,16 +499,25 @@ def _run_execute_orders(
         proposal_path=str(proposal_path),
         broker=execute_broker,
         mock_state_path=str(root / "data/broker/mock_state.json"),
+        ibkr_state_path=str(root / "data/broker/ibkr_state.json"),
         dry_run=execute_dry_run,
         output_path=str(output_path),
         guardrails_path=execution_guardrails_path,
         enable_guardrails=enable_execution_guardrails,
+        ibkr_contracts_path=execute_ibkr_contracts_path,
+        ibkr_host=execute_ibkr_host,
+        ibkr_port=execute_ibkr_port,
+        ibkr_client_id=execute_ibkr_client_id,
+        ibkr_timeout_sec=execute_ibkr_timeout_sec,
+        ibkr_what_if=execute_ibkr_what_if,
+        ibkr_limit_buffer_pct=execute_ibkr_limit_buffer_pct,
     )
     return {
         "output_path": str(output_path),
         "submitted_count": int(result.get("submitted_count") or 0),
         "skipped_count": int(result.get("skipped_count") or 0),
         "dry_run": bool(result.get("dry_run")),
+        "what_if": bool(result.get("what_if")),
         "guardrails_enabled": bool((result.get("guardrails") or {}).get("enabled")),
         "guardrails_passed": bool((result.get("guardrails") or {}).get("passed")),
         "month": month,
